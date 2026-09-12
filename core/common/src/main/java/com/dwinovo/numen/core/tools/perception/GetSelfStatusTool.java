@@ -2,12 +2,12 @@ package com.dwinovo.numen.core.tools.perception;
 
 import com.dwinovo.numen.agent.tool.Schema;
 import com.dwinovo.numen.agent.tool.NumenTool;
+import com.dwinovo.numen.core.ItemDescribe;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import net.minecraft.core.Registry;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -93,8 +93,13 @@ public final class GetSelfStatusTool implements NumenTool {
             ItemStack s = self.getItemBySlot(slot);
             if (s.isEmpty()) continue;
             JsonObject o = new JsonObject();
-            o.addProperty("item", BuiltInRegistries.ITEM.getKey(s.getItem()).toString());
+            o.addProperty("item", ItemDescribe.registryName(s));
             if (s.getCount() > 1) o.addProperty("count", s.getCount());
+            // 附魔单独成字段:注册名上白板与锋利五一模一样,而"她以为自己拿着什么"直接决定
+            // 她敢不敢去打这一仗(玩家报的 bug:看不见装备的附魔)。结构化输出不放短标签,
+            // 免得下游还要从字符串里拆回来。
+            String enchants = ItemDescribe.enchants(s);
+            if (!enchants.isEmpty()) o.addProperty("enchants", enchants);
             equipment.add(slot.getName(), o);
         }
         root.add("equipment", equipment);

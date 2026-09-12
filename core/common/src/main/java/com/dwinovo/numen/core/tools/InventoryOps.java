@@ -2,6 +2,7 @@ package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.agent.tool.ToolArgs;
 import com.dwinovo.numen.agent.tool.api.ToolContext;
+import com.dwinovo.numen.core.ItemDescribe;
 import com.dwinovo.numen.task.TaskRecord;
 import com.dwinovo.numen.core.task.collect.CollectItemsTaskRecord;
 import com.dwinovo.numen.core.task.inventory.DropItemsTaskRecord;
@@ -54,7 +55,8 @@ String slot,
         EquipmentSlot equipSlot = readSlot(slot);
 
         Item item = ToolArgs.parseItem(item_id);
-        String label = BuiltInRegistries.ITEM.getKey(item).getPath();
+        // 回执标签统一走 ItemDescribe(注册名,与背包块/inspect_gui 同一口径)。
+        String label = ItemDescribe.registryName(item);
         return new EquipTaskRecord(ctx.toolCallId(), ctx.deadline(EQUIP_TIMEOUT_TICKS), item, equipSlot, label);
     }
 
@@ -94,7 +96,7 @@ String slot,
 String item_id,
             ToolContext ctx) {
         Item item = ToolArgs.parseItem(item_id);
-        String label = BuiltInRegistries.ITEM.getKey(item).getPath();
+        String label = ItemDescribe.registryName(item);
         return new EatItemTaskRecord(ctx.toolCallId(), ctx.deadline(EAT_TIMEOUT_TICKS), item, label);
     }
 
@@ -104,7 +106,7 @@ int count,
             ToolContext ctx) {
         Item item = ToolArgs.parseItem(item_id);
         count = Mth.clamp(count, 1, DROP_MAX_COUNT);
-        String label = BuiltInRegistries.ITEM.getKey(item).getPath();
+        String label = ItemDescribe.registryName(item);
         return new DropItemsTaskRecord(ctx.toolCallId(), ctx.deadline(DROP_TIMEOUT_TICKS),
                 item, count, label);
     }
@@ -140,7 +142,7 @@ Integer radius,
 
     private static String labelFor(Set<Item> filter) {
         Item first = filter.iterator().next();
-        String path = BuiltInRegistries.ITEM.getKey(first).getPath();
+        String path = ItemDescribe.registryName(first);
         return filter.size() == 1 ? path : path + "+" + (filter.size() - 1);
     }
 

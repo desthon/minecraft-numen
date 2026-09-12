@@ -93,8 +93,10 @@ class CompactSplitTest {
     void estimatorCountsCjkHeavierThanAscii() {
         var cjk = new ConvoState.Msg.User("字".repeat(400));
         var ascii = new ConvoState.Msg.User("a".repeat(400));
-        assertTrue(CompactSplit.estimateTokens(cjk) > CompactSplit.estimateTokens(ascii) * 3,
-                "CJK 每字约 1 token,ASCII 约 4 字符/token");
+        // 3 倍这条线随 ASCII 尺子一起从 4 字符/token 挪到 2.5:400 字 CJK 估 408,400 字符 ASCII
+        // 估 168(160 内容 + 8 结构),比值 2.4——原来的 *3 只在 4 字符/token(108)时成立。
+        assertTrue(CompactSplit.estimateTokens(cjk) > CompactSplit.estimateTokens(ascii) * 2,
+                "CJK 每字约 1 token,ASCII 约 2.5 字符/token");
         // 列表求和 = 逐条之和
         var list = new ArrayList<ConvoState.Msg>(List.of(cjk, ascii));
         assertEquals(CompactSplit.estimateTokens(cjk) + CompactSplit.estimateTokens(ascii),

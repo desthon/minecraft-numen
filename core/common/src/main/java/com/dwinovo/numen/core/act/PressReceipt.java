@@ -1,5 +1,6 @@
 package com.dwinovo.numen.core.act;
 
+import com.dwinovo.numen.core.ItemDescribe;
 import com.dwinovo.numen.entity.NumenPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -83,8 +84,9 @@ public final class PressReceipt {
         if (stack.isEmpty()) {
             return "empty";
         }
-        String path = BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();
-        return stack.getCount() > 1 ? path + " x" + stack.getCount() : path;
+        // 换了哪一把:名字必须带附魔,不然"白板剑 -> 锋利五剑"读起来是没变(口径见 ItemDescribe)。
+        String name = ItemDescribe.item(stack);
+        return stack.getCount() > 1 ? name + " x" + stack.getCount() : name;
     }
 
     private static String blockName(BlockState state) {

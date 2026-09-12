@@ -1,8 +1,8 @@
 package com.dwinovo.numen.core.tools;
 
+import com.dwinovo.numen.core.ItemDescribe;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.task.TaskResult;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.CraftingContainer;
 import net.minecraft.world.inventory.DataSlot;
@@ -119,9 +119,9 @@ public final class GuiOps {
     }
 
     private static String describe(ItemStack stack) {
-        return stack.isEmpty()
-                ? "-"
-                : BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath() + " x" + stack.getCount();
+        // 附魔必须出现在这一屏上:只看注册名的话,白板剑与锋利五的剑长得一模一样,而她要
+        // 在这里决定把哪一把换到手上(口径见 ItemDescribe)。
+        return stack.isEmpty() ? "-" : ItemDescribe.of(stack);
     }
 
     public String closeGui(NumenPlayer self) {
