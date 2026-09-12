@@ -117,6 +117,37 @@ public final class ModLanguageData {
         public static final String EDIT_DISMISS          = "numen.edit.dismiss";
         public static final String EDIT_PROVIDER_UNBOUND = "numen.edit.provider_unbound";
         public static final String EDIT_MODE_LOCKED      = "numen.edit.mode_locked";
+        // 声线那一格下面那行说明:库空 / 总开关关 / 绑定指向已删条目——三种"选了她也不会
+        // 出声"的情形。以前这三句是硬编码英文,中文客户端上照样显示英文。
+        public static final String EDIT_VOICE_HINT_EMPTY    = "numen.edit.voice_hint_empty";
+        public static final String EDIT_VOICE_HINT_OFF      = "numen.edit.voice_hint_off";
+        public static final String EDIT_VOICE_HINT_DANGLING = "numen.edit.voice_hint_dangling";
+
+        // 编辑卡「顺路挖矿」子页:入口行 / 子页标题与按钮 / 状态行(空态、服务端原话、本地校验)。
+        public static final String EDIT_ORES_ROW            = "numen.edit.ores_row";
+        public static final String EDIT_ORES_ROW_LOADING    = "numen.edit.ores_row_loading";
+        public static final String EDIT_ORES_ROW_UNKNOWN    = "numen.edit.ores_row_unknown";
+        public static final String EDIT_ORES_ROW_NONE       = "numen.edit.ores_row_none";
+        public static final String EDIT_ORES_TITLE          = "numen.edit.ores_title";
+        public static final String EDIT_ORES_BACK           = "numen.edit.ores_back";
+        public static final String EDIT_ORES_CLEAR          = "numen.edit.ores_clear";
+        public static final String EDIT_ORES_HINT_SAVED     = "numen.edit.ores_hint_saved";
+        public static final String EDIT_ORES_HINT_RANGE     = "numen.edit.ores_hint_range";
+        public static final String EDIT_ORES_PLACEHOLDER    = "numen.edit.ores_placeholder";
+        public static final String EDIT_ORES_ADD            = "numen.edit.ores_add";
+        public static final String EDIT_ORES_READING        = "numen.edit.ores_reading";
+        public static final String EDIT_ORES_EMPTY          = "numen.edit.ores_empty";
+        public static final String EDIT_ORES_COUNT          = "numen.edit.ores_count";
+        public static final String EDIT_ORES_NEED_TOOL      = "numen.edit.ores_need_tool";
+        public static final String EDIT_ORES_OFFLINE        = "numen.edit.ores_offline";
+        public static final String EDIT_ORES_NO_REPLY       = "numen.edit.ores_no_reply";
+        public static final String EDIT_ORES_TAG_KEPT       = "numen.edit.ores_tag_kept";
+        public static final String EDIT_ORES_NEED_INPUT     = "numen.edit.ores_need_input";
+        public static final String EDIT_ORES_ALREADY        = "numen.edit.ores_already";
+
+        // 召唤卡「声线」那一格的空态说明——与编辑卡同义,但措辞是"现在召唤她会怎样"。
+        public static final String SUMMON_VOICE_HINT_EMPTY  = "numen.summon.voice_hint_empty";
+        public static final String SUMMON_VOICE_HINT_OFF    = "numen.summon.voice_hint_off";
 
         // Skin library tab (upload png → MineSkin-signed textures).
         public static final String SKIN_TITLE           = "numen.skin.title";
@@ -196,6 +227,12 @@ public final class ModLanguageData {
         public static final String VOICE_BIND_NONE      = "numen.voice.bind_none";
         public static final String VOICE_SUMMON_LABEL   = "numen.voice.summon_label";
         public static final String VOICE_SUMMON_EMPTY   = "numen.voice.summon_empty";
+        /** 合成失败(鉴权/额度/音色 id/网络):她说的话没出声,得让主人知道原因。 */
+        public static final String VOICE_SYNTH_FAILED   = "numen.voice.synth_failed";
+        // 取音色这一步就没拿到声线(总开关关着 / 绑定悬空):同样"她一声不响",
+        // 但根因在配置而不在合成。与合成失败共用一套节流闸门(见 VoiceFailureNotice)。
+        public static final String VOICE_SILENT_OFF      = "numen.voice.silent_off";
+        public static final String VOICE_SILENT_DANGLING = "numen.voice.silent_dangling";
 
         // STT (voice input)
         public static final String STT_NAV            = "numen.settings.nav.stt";
@@ -427,10 +464,35 @@ public final class ModLanguageData {
         adder.add(Keys.SUMMON_MODE_CREATIVE,    "Creative");
         adder.add(Keys.SUMMON_MODE_INHERITED,   "%s (inherited)");
         adder.add(Keys.SUMMON_MODE_INHERIT_TIP, "No gamemode permission — she inherits your current mode");
+        adder.add(Keys.SUMMON_VOICE_HINT_EMPTY,  "No voice set up yet — summon her now and she'll stay silent. Add one in Settings → Voice.");
+        adder.add(Keys.SUMMON_VOICE_HINT_OFF,    "Voice is switched off — she won't make a sound until you turn it on in Settings → Voice.");
         adder.add(Keys.EDIT_TITLE,            "Edit");
         adder.add(Keys.EDIT_DISMISS,          "Dismiss");
         adder.add(Keys.EDIT_PROVIDER_UNBOUND, "(unbound)");
         adder.add(Keys.EDIT_MODE_LOCKED,      "No cheat/OP permission — her mode can't be changed");
+        adder.add(Keys.EDIT_VOICE_HINT_EMPTY,    "No voice set up yet — add one in Settings → Voice, or she stays silent.");
+        adder.add(Keys.EDIT_VOICE_HINT_OFF,      "Voice is switched off — turn it on in Settings → Voice, or she stays silent.");
+        adder.add(Keys.EDIT_VOICE_HINT_DANGLING, "The voice she used has been deleted — pick another one, or she stays silent.");
+        adder.add(Keys.EDIT_ORES_ROW,            "Bonus ores: %s  ▸");
+        adder.add(Keys.EDIT_ORES_ROW_LOADING,    "…");
+        adder.add(Keys.EDIT_ORES_ROW_UNKNOWN,    "?");
+        adder.add(Keys.EDIT_ORES_ROW_NONE,       "none");
+        adder.add(Keys.EDIT_ORES_TITLE,          "Bonus ores");
+        adder.add(Keys.EDIT_ORES_BACK,           "< Back");
+        adder.add(Keys.EDIT_ORES_CLEAR,          "Clear list");
+        adder.add(Keys.EDIT_ORES_HINT_SAVED,     "Applies right away — it lives on the server.");
+        adder.add(Keys.EDIT_ORES_HINT_RANGE,     "Mined when within 24 blocks of the job at hand.");
+        adder.add(Keys.EDIT_ORES_PLACEHOLDER,    "minecraft:diamond_ore or #minecraft:iron_ores");
+        adder.add(Keys.EDIT_ORES_ADD,            "Add");
+        adder.add(Keys.EDIT_ORES_READING,        "Reading the list from the server…");
+        adder.add(Keys.EDIT_ORES_EMPTY,          "Nothing on the list yet — she walks straight past ore.");
+        adder.add(Keys.EDIT_ORES_COUNT,          "She'll pick up %s kinds of ore along the way");
+        adder.add(Keys.EDIT_ORES_NEED_TOOL,      " · %s of them need a better tool");
+        adder.add(Keys.EDIT_ORES_OFFLINE,        "Not connected — the bonus-ore list lives on the server.");
+        adder.add(Keys.EDIT_ORES_NO_REPLY,       "The server didn't answer the bonus-ores call.");
+        adder.add(Keys.EDIT_ORES_TAG_KEPT,       "Still on the list: this one comes from a #tag. Clear the list and add the ores you want one by one.");
+        adder.add(Keys.EDIT_ORES_NEED_INPUT,     "Type a block id or a #tag first, e.g. minecraft:diamond_ore.");
+        adder.add(Keys.EDIT_ORES_ALREADY,        "\"%s\" is already on the list.");
         adder.add(Keys.SKIN_TITLE,           "Skins");
         adder.add(Keys.SKIN_ADD,             "New");
         adder.add(Keys.SKIN_EMPTY,           "No skins yet. Click New, then drag a skin png into the window.");
@@ -519,6 +581,9 @@ public final class ModLanguageData {
         adder.add(Keys.VOICE_BIND_NONE,      "None (silent)");
         adder.add(Keys.VOICE_SUMMON_LABEL,   "Voice");
         adder.add(Keys.VOICE_SUMMON_EMPTY,   " (empty — create one in Settings → Voice)");
+        adder.add(Keys.VOICE_SYNTH_FAILED,   "Speech synthesis failed: %s — that line went unspoken. Check the voice in Settings → Voice (Preview there reports the same error).");
+        adder.add(Keys.VOICE_SILENT_OFF,      "Voice is switched off — she can't make a sound until you turn it back on in Settings → Voice.");
+        adder.add(Keys.VOICE_SILENT_DANGLING, "The voice she was using has been deleted — pick a new one in Settings → Voice, or she stays silent.");
     
         adder.add(Keys.GUI_INLINE_NEED_KEY,             "API key required");
         adder.add(Keys.GUI_INLINE_REQUIRED,             "Required");
@@ -754,10 +819,35 @@ public final class ModLanguageData {
         adder.add(Keys.SUMMON_MODE_CREATIVE,    "创造");
         adder.add(Keys.SUMMON_MODE_INHERITED,   "%s(继承)");
         adder.add(Keys.SUMMON_MODE_INHERIT_TIP, "没有 gamemode 权限——同伴将继承你当前的模式");
+        adder.add(Keys.SUMMON_VOICE_HINT_EMPTY,  "还没配声线 —— 现在召唤她不会出声,先到「设置 → 语音」建一条。");
+        adder.add(Keys.SUMMON_VOICE_HINT_OFF,    "语音总开关关着 —— 到「设置 → 语音」打开,不然新同伴也是哑的。");
         adder.add(Keys.EDIT_TITLE,            "编辑");
         adder.add(Keys.EDIT_DISMISS,          "遣散");
         adder.add(Keys.EDIT_PROVIDER_UNBOUND, "(未绑定)");
         adder.add(Keys.EDIT_MODE_LOCKED,      "没有作弊/OP 权限,改不了同伴的模式");
+        adder.add(Keys.EDIT_VOICE_HINT_EMPTY,    "还没给她配声线 —— 到「设置 → 语音」新建一条,不然她一直不吭声。");
+        adder.add(Keys.EDIT_VOICE_HINT_OFF,      "语音总开关关着 —— 到「设置 → 语音」打开,不然她一直不吭声。");
+        adder.add(Keys.EDIT_VOICE_HINT_DANGLING, "她原来用的声线已经被删了 —— 重新选一条,不然她一直不吭声。");
+        adder.add(Keys.EDIT_ORES_ROW,            "顺路挖矿:%s  ▸");
+        adder.add(Keys.EDIT_ORES_ROW_LOADING,    "…");
+        adder.add(Keys.EDIT_ORES_ROW_UNKNOWN,    "?");
+        adder.add(Keys.EDIT_ORES_ROW_NONE,       "无");
+        adder.add(Keys.EDIT_ORES_TITLE,          "顺路挖矿");
+        adder.add(Keys.EDIT_ORES_BACK,           "< 返回");
+        adder.add(Keys.EDIT_ORES_CLEAR,          "清空");
+        adder.add(Keys.EDIT_ORES_HINT_SAVED,     "改动即时生效 —— 这份名单存在服务器上。");
+        adder.add(Keys.EDIT_ORES_HINT_RANGE,     "她干活时,24 格内出现名单里的矿就顺手挖掉。");
+        adder.add(Keys.EDIT_ORES_PLACEHOLDER,    "minecraft:diamond_ore 或 #minecraft:iron_ores");
+        adder.add(Keys.EDIT_ORES_ADD,            "添加");
+        adder.add(Keys.EDIT_ORES_READING,        "正在向服务器读取名单…");
+        adder.add(Keys.EDIT_ORES_EMPTY,          "名单还是空的 —— 路过矿石她不会停手。");
+        adder.add(Keys.EDIT_ORES_COUNT,          "路上顺手挖 %s 种");
+        adder.add(Keys.EDIT_ORES_NEED_TOOL,      " · 其中 %s 种现有工具挖不动");
+        adder.add(Keys.EDIT_ORES_OFFLINE,        "没连上服务器 —— 这份名单存在服务端。");
+        adder.add(Keys.EDIT_ORES_NO_REPLY,       "服务器没有回应这次名单操作。");
+        adder.add(Keys.EDIT_ORES_TAG_KEPT,       "它还在名单上:这一条来自 #标签。想要精确到某一种,先清空再逐个添加。");
+        adder.add(Keys.EDIT_ORES_NEED_INPUT,     "先填一个方块 id 或 #标签,比如 minecraft:diamond_ore。");
+        adder.add(Keys.EDIT_ORES_ALREADY,        "「%s」已经在名单里了。");
         adder.add(Keys.SKIN_TITLE,           "皮肤库");
         adder.add(Keys.SKIN_ADD,             "新建");
         adder.add(Keys.SKIN_EMPTY,           "还没有皮肤。点右上角\"新建\",再把皮肤 png 拖进游戏窗口。");
@@ -846,6 +936,9 @@ public final class ModLanguageData {
         adder.add(Keys.VOICE_BIND_NONE,      "无(静音)");
         adder.add(Keys.VOICE_SUMMON_LABEL,   "声线");
         adder.add(Keys.VOICE_SUMMON_EMPTY,   "(空——到 设置 → 语音 新建)");
+        adder.add(Keys.VOICE_SYNTH_FAILED,   "语音合成失败:%s —— 这句没能念出来。到「设置 → 语音」检查声线配置(那里点「试听」能复现同一个错误)。");
+        adder.add(Keys.VOICE_SILENT_OFF,      "语音总开关关着 —— 她一直没出声。想听她说话,到「设置 → 语音」把开关打开。");
+        adder.add(Keys.VOICE_SILENT_DANGLING, "她原来用的那条声线已经被删了 —— 她一直没出声。到「设置 → 语音」重新给她选一条。");
     
         adder.add(Keys.KEY_CATEGORY_NUMEN,              "Numen");
         adder.add(Keys.GUI_INLINE_NEED_KEY,             "请先填写密钥");
