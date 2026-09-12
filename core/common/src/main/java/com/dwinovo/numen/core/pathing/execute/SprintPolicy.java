@@ -19,6 +19,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -49,6 +50,11 @@ final class SprintPolicy {
         static final Decision NO = new Decision(false, -1, false, false, null);
         static final Decision YES = new Decision(true, -1, false, false, null);
     }
+
+    /** 平走跑跳:前方同向直线平走至少这么长才值得起跳(留足落地余量)。 */
+    private static final int HOP_MIN_STRAIGHT_RUN = 4;
+    /** 起跳弧检查覆盖的格数:脚下这格 + 前方三格。 */
+    private static final int HOP_ARC_CELLS = 4;
 
     private final NavPath path;
     private final NumenPlayer player;
@@ -86,6 +92,11 @@ final class SprintPolicy {
         }
 
         if (requested) {
+            // 平地赶路的跑跳:平走原语已经在请求疾跑,这里再按直线段的前后文
+            // 决定要不要起跳(见 NavSettings#sprintJumpOnFlat)。
+            if (hopOnFlatStraightaway(current, pathPosition)) {
+                return new Decision(true, -1, true, false, null);
+            }
             return Decision.YES;
         }
 
@@ -166,6 +177,79 @@ final class SprintPolicy {
             }
         }
         return Decision.NO;
+    }
+
+    /**
+     * 平地跑跳:贴地、不在液体里(水里的 JUMP 是划水上浮,归
+     * {@link Movement} 的连续上浮规则管,不该在这里抢)、前方是同向直线
+     * 平走且起跳弧全通透时才跳。跳一次就够——落地前 onGround 为假,
+     * 自然不会逐 tick 重按;落地那一刻再跳,就是原版那种连续跑跳。
+     */
+    private boolean hopOnFlatStraightaway(Movement current, int pathPosition) {
+        if (!NavSettings.get().sprintJumpOnFlat || !(current instanceof MovementTraverse)) {
+            return false;
+        }
+        boolean feetInLiquid = MovementHelper.isLiquid(
+                player.level().getBlockState(PathExecutor.playerFeet(player)));
+        int straightRun = straightTraverseRun(path.movements(), pathPosition, HOP_MIN_STRAIGHT_RUN);
+        return shouldHopOnFlat(player.onGround(), feetInLiquid, straightRun,
+                hopArcClear(current));
+    }
+
+    /**
+     * 跑跳判据(纯逻辑,可测):贴地、不在液体里、前方同向直线平走够长、
+     * 整条起跳弧通透。四个条件缺一不可——跳早了会磕头,跳在拐弯/坡口上
+     * 会冲过头,跳进水里则白丢一次上浮冲量。
+     */
+    static boolean shouldHopOnFlat(boolean onGround, boolean feetInLiquid, int straightRun,
+                                   boolean arcClear) {
+        return onGround && !feetInLiquid && straightRun >= HOP_MIN_STRAIGHT_RUN && arcClear;
+    }
+
+    /**
+     * 从 {@code pathPosition + 1} 起、与当前步同向的连续平走步数(纯逻辑,可测),
+     * 最多数 {@code max} 步(够判就够了)。当前步不是平走或下标越界返回 0。
+     */
+    static int straightTraverseRun(List<Movement> movements, int pathPosition, int max) {
+        if (pathPosition < 0 || pathPosition >= movements.size()) {
+            return 0;
+        }
+        Movement current = movements.get(pathPosition);
+        if (!(current instanceof MovementTraverse)) {
+            return 0;
+        }
+        int run = 0;
+        for (int i = pathPosition + 1; i < movements.size() && run < max; i++) {
+            Movement next = movements.get(i);
+            if (!(next instanceof MovementTraverse)
+                    || !next.getDirection().equals(current.getDirection())) {
+                break;
+            }
+            run++;
+        }
+        return run;
+    }
+
+    /**
+     * 起跳弧通透:脚下与前方三格的三格身位全通透({@link MovementHelper#fullyPassable}
+     * 排除一切流体、火、蛛网、门之类,跳过去不会磕头也不会踏进危险格),且前方
+     * 各格脚下可站(跳出去得落得下)。
+     */
+    private boolean hopArcClear(Movement current) {
+        var level = LoadedOnlyView.of(player.level());
+        BlockPos dir = current.getDirection();
+        for (int i = 0; i < HOP_ARC_CELLS; i++) {
+            BlockPos cell = current.getSrc().offset(dir.getX() * i, 0, dir.getZ() * i);
+            if (!MovementHelper.fullyPassable(level, cell)
+                    || !MovementHelper.fullyPassable(level, cell.above())
+                    || !MovementHelper.fullyPassable(level, cell.above(2))) {
+                return false;
+            }
+            if (i > 0 && !MovementHelper.canWalkOn(level, cell.below())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

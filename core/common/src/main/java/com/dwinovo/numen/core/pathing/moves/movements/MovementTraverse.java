@@ -251,13 +251,21 @@ public class MovementTraverse extends Movement {
                 || ladder
                 || MovementPlacement.canUseFrostWalker(player, level.getBlockState(positionToPlace));
         BlockPos feet = feet(player);
-        if (feet.getY() != dest.getY() && !ladder) {
-            // 高度不对:低了跳一下,高了等下落
-            if (feet.getY() < dest.getY()) {
-                return state.setInput(Input.JUMP, true);
-            }
-            return state;
+        HeightMismatch mismatch = heightMismatch(feet.getY(), dest.getY(),
+                MovementHelper.isLiquid(level.getBlockState(feet)), ladder);
+        if (mismatch == HeightMismatch.JUMP) {
+            return state.setInput(Input.JUMP, true); // 高度不对,低了跳一下
         }
+        if (mismatch == HeightMismatch.WAIT) {
+            return state; // 高了等下落
+        }
+        // NONE:高度正好。SWIM:在水里——浮着的身体与格位天然差一截(按跳上浮
+        // 与重力把身体稳在水面附近,脚位在相邻两格里摆),照陆地的"低了跳、
+        // 高了等"处置的话,这一 tick 只剩一个 JUMP 键:既不前进、也不请求疾跑
+        // (疾跑的请求在下面一点),身体原地上下浮,一个动作耗到超时——现象就是
+        // "一入水就卡住、退回来"。水里就该继续游:落到下面的行走逻辑,它会朝
+        // 落点压前进键并请求 SPRINT,而原版水中疾跑就是游泳(不施加流体阻力里
+        // 的重力项、且是游泳姿态的开关,见 Player.travel / Entity.updateSwimming)。
 
         if (isTheBridgeBlockThere) {
             if (feet.equals(dest)) {
@@ -380,6 +388,34 @@ public class MovementTraverse extends Movement {
             AimGeometry.moveTowards(player, state, positionsToBreak[0]);
             return state;
         }
+    }
+
+    /** 身位与节点的竖直错位该怎么处置(纯逻辑,可测)。 */
+    enum HeightMismatch {
+        /** 高度正好,或挂在梯/藤上(上下由行走逻辑自会处理)。 */
+        NONE,
+        /** 身位低了:按跳。 */
+        JUMP,
+        /** 身位高了:等下落。 */
+        WAIT,
+        /** 在液体里:不按陆地的"低了跳、高了等"处置,继续游泳前进。 */
+        SWIM
+    }
+
+    /**
+     * 竖直错位判据(纯逻辑,可测)。
+     *
+     * <p>水里单列一档:见 {@link #updateState} 的说明——陆地的"低了跳、
+     * 高了等"在水里会把动作锁死在原地。
+     */
+    static HeightMismatch heightMismatch(int feetY, int destY, boolean feetInLiquid, boolean onLadder) {
+        if (feetY == destY || onLadder) {
+            return HeightMismatch.NONE;
+        }
+        if (feetInLiquid) {
+            return HeightMismatch.SWIM;
+        }
+        return feetY < destY ? HeightMismatch.JUMP : HeightMismatch.WAIT;
     }
 
     /** 正在潜行悬空放置时不可中断,其余时刻可。 */

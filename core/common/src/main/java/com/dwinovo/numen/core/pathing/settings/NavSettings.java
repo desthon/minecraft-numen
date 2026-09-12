@@ -221,6 +221,16 @@ public final class NavSettings {
     public boolean allowOvershootDiagonalDescend = true;
     /** 允许水中疾跑。 */
     public boolean sprintInWater = true;
+    /**
+     * 平地赶路的跑跳:疾跑中的直线平走路段周期性起跳。
+     *
+     * <p>原版玩家赶路就是"疾跑 + 起跳":起跳(<b>且</b>是疾跑状态)会给
+     * 0.2 格/tick 的前冲动量,空中不吃地面摩擦,均速约 7.1 格/s,而纯疾跑
+     * 只有 5.6。此前只有"直跳上台/跑酷/V 形谷/坠落前越"才起跳,平地上一次
+     * 都不跳,于是长途只能以纯疾跑速度一格一格爬。只影响平地直线段:拐弯、
+     * 上下坡、头顶不够高的地方一律不跳(见 SprintPolicy#hopOnFlatStraightaway)。
+     */
+    public boolean sprintJumpOnFlat = true;
     /** 挖掘准备期同时向目标走近。 */
     public boolean walkWhileBreaking = true;
     /** 头顶有下坠方块实体时暂停挖掘等待落定。 */

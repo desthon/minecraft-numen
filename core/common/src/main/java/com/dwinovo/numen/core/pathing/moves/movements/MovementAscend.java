@@ -143,8 +143,15 @@ public class MovementAscend extends Movement {
 
     @Override
     public MovementState updateState(MovementState state) {
-        if (feet(player).getY() < src.getY()) {
-            // 掉下去了:即使还在挖掘准备期也判不可达
+        if (feet(player).getY() < src.getY()
+                && !MovementHelper.isLiquid(player.level().getBlockState(feet(player)))) {
+            // 掉下去了:即使还在挖掘准备期也判不可达。
+            // 水里例外(与 MovementDiagonal 的同一处宽容同源):浮在水面的身体与
+            // 格位差一格是常态(按跳上浮与重力把身体稳在水面附近,脚位在相邻两格
+            // 里摆),而"从水里爬上对岸"这一步的前提本来就是身子比岸低——照陆地
+            // 判就当场 UNREACHABLE,执行器收到便整条取消路径,现象是"一到水边/
+            // 爬到对岸那一刻退回来重规划"。水里就继续爬:下面的逻辑会朝落点压前进
+            // 键并按跳,原版水中按跳就是上浮。
             return state.setStatus(MovementStatus.UNREACHABLE);
         }
         super.updateState(state);
