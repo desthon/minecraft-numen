@@ -133,6 +133,7 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.GetOwnerStatusTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.inventory.LookupRecipeTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.inventory.CraftTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.work.WriteBookTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.ScanNearbyEntitiesTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.ScanBlocksTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.ScaffoldMaterialsTool());
