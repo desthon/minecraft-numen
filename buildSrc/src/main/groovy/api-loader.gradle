@@ -82,9 +82,16 @@ tasks.named('jar', Jar) {
 //   1. 本机还没有产物 → 把 datagen 拉进打包(一次性开销);
 //   2. 打完再验一次 jar 里到底有没有语言文件 —— 缺了当场把构建判死。
 // 形状照抄 core/forge 那条 refmap 绞索:坏包不许静默出门。
-def datagenTask = tasks.findByName('runDatagen') ?: tasks.findByName('Data')
-if (datagenTask != null && !file('src/generated/resources').isDirectory()) {
-    tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { dependsOn datagenTask }
+// 条件取「不存在或空」:被中断的 datagen 会留下空目录,只判存在的话自动补跑不触发,
+// 而把关那一步照样会拦 —— 于是每次构建都失败,却不肯自己跑一次 datagen。
+def generatedReady = { -> def d = file('src/generated/resources'); d.isDirectory() && d.listFiles() }
+// 任务名要等到 afterEvaluate 才查得到:loom / ForgeGradle 的 datagen 运行配置是在
+// 各自的 build.gradle 后段才注册的,而本脚本是 plugins{} 块里第一个被应用的。
+afterEvaluate {
+    def datagenTask = tasks.findByName('runDatagen') ?: tasks.findByName('Data')
+    if (datagenTask != null && !generatedReady()) {
+        tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { dependsOn datagenTask }
+    }
 }
 tasks.named('jar', Jar) {
     doLast {

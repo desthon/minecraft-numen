@@ -49,9 +49,16 @@ tasks.named('sourcesJar', Jar) {
 // core 这边产出的是标签(do_not_break 里的床/门、垫路料标签……),少了它们规矩会静默失效:
 // 她会拆主人的床、找不到任何可垫的方块,而日志里一句异常都没有。
 // 与 api 那边同一条规矩:缺产物就把 datagen 拉进构建,别让空标签的包混出去。
-def datagenTask = tasks.findByName('runDatagen') ?: tasks.findByName('Data')
-if (datagenTask != null && !file('src/generated/resources').isDirectory()) {
-    tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { dependsOn datagenTask }
+// 条件取「不存在或空」:被中断的 datagen 会留下空目录,只判存在的话自动补跑不触发,
+// 而把关那一步照样会拦 —— 于是每次构建都失败,却不肯自己跑一次 datagen。
+def generatedReady = { -> def d = file('src/generated/resources'); d.isDirectory() && d.listFiles() }
+// 任务名要等到 afterEvaluate 才查得到:loom / ForgeGradle 的 datagen 运行配置是在
+// 各自的 build.gradle 后段才注册的,而本脚本是 plugins{} 块里第一个被应用的。
+afterEvaluate {
+    def datagenTask = tasks.findByName('runDatagen') ?: tasks.findByName('Data')
+    if (datagenTask != null && !generatedReady()) {
+        tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { dependsOn datagenTask }
+    }
 }
 tasks.named('jar', Jar) {
     doFirst {
