@@ -8,6 +8,7 @@ import com.dwinovo.numen.agent.provider.ProviderRegistry;
 
 import com.dwinovo.numen.agent.provider.AnthropicProvider;
 import com.dwinovo.numen.agent.provider.DeepSeekProvider;
+import com.dwinovo.numen.agent.provider.DsmlToolCalls;
 import com.dwinovo.numen.agent.provider.IToolSpec;
 import com.dwinovo.numen.agent.provider.LlmProvider;
 import com.dwinovo.numen.agent.provider.LlmToolCall;
@@ -209,7 +210,13 @@ public final class NumenLlmClient {
                 AiLog.LOG.warn("[numen-llm] accumulator failed on chunk: {}", ex.getMessage());
             }
         }).thenApply(v -> {
-            AssistantTurn turn = provider.finalizeStream(acc);
+            // 分流口:content 与 tool_calls 在这里第一次成形。有的模型不吐结构化 tool_calls,
+            // 而是把调用写成正文里的 DSML 记号 —— 就在这一行还原成结构化调用,同时把正文里的
+            // 记号剥掉。往后的每一环(会话历史、面板、气泡、语音)拿到的都是同一份干净结果。
+            DsmlToolCalls.Reconciled rec = DsmlToolCalls.reconcile(provider.finalizeStream(acc));
+            for (String note : rec.notes()) AiLog.LOG.info("[numen-llm] DSML: {}", note);
+            for (String problem : rec.problems()) AiLog.LOG.warn("[numen-llm] DSML: {}", problem);
+            AssistantTurn turn = rec.turn();
             logCallSummary(t0, acc, turn);
             return new ChatResult(turn, provider.usage(acc.usage));
         });

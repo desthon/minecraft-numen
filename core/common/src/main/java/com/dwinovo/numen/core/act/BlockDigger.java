@@ -17,8 +17,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
-import net.minecraft.world.phys.shapes.Shapes;
-import net.minecraft.world.phys.shapes.VoxelShape;
 
 /**
  * Progressive block breaking that drives the SAME native server entry point a
@@ -147,7 +145,8 @@ public final class BlockDigger {
         // the owner's wall because a target happens to sit behind it. (The EXPLICIT target is a
         // different matter: that one was picked on purpose, and break_block / mine naming it is
         // the human's authorisation. Only the incidental collateral is refused here.)
-        BlockHitResult hit = reachableHit(target);
+        // 唯一真源在 AimGeometry:挖掘与建造清障共用同一条"够得着 + 看得见"的射线判据
+        BlockHitResult hit = AimGeometry.reachableHit(player, target);
         BlockPos effective = target;
         if (hit == null) {
             BlockHitResult center = centerRaycast(target);
@@ -171,14 +170,13 @@ public final class BlockDigger {
         return advance(hit, effective.equals(target));
     }
 
-
     public DigResult digTargetStep(BlockPos target) {
         if (blockHitDelay > 0) {
             blockHitDelay--;
             InputDriver.halt(player);
             return DigResult.PROGRESSING;
         }
-        BlockHitResult hit = reachableHit(target);
+        BlockHitResult hit = AimGeometry.reachableHit(player, target);
         InputDriver.halt(player);
         if (hit == null) {
             return DigResult.NO_SHOT;
@@ -283,56 +281,16 @@ public final class BlockDigger {
     }
 
     /**
-     * The first point ON {@code pos} the eye can
-     * actually raycast to — the block's shape centre first, then its six face centres. The
-     * returned {@link BlockHitResult} carries the exact aim point ({@code getLocation}) AND
-     * the face the ray hits ({@code getDirection}), so the dig looks at the real interaction
-     * face like a player would. {@code null} if nothing on the block is in line of sight.
-     */
-    private BlockHitResult reachableHit(BlockPos pos) {
-        Level level = player.level();
-        Vec3 eye = player.getEyePosition();
-        double reach = com.dwinovo.numen.core.pathing.moves.AimGeometry.blockReachDistance(player);
-        BlockState state = level.getBlockState(pos);
-        VoxelShape shape = state.getShape(level, pos);
-        if (shape.isEmpty()) {
-            shape = Shapes.block();
-        }
-        // Collision-shape centre first (empty collision → whole-cell centre),
-        // then the six face centres on the outline shape.
-        Vec3[] aims = {
-                com.dwinovo.numen.core.pathing.moves.AimGeometry.collisionCenter(level, pos, state),
-                offsetOn(pos, shape, 0.5, 0.0, 0.5),
-                offsetOn(pos, shape, 0.5, 1.0, 0.5),
-                offsetOn(pos, shape, 0.5, 0.5, 0.0),
-                offsetOn(pos, shape, 0.5, 0.5, 1.0),
-                offsetOn(pos, shape, 0.0, 0.5, 0.5),
-                offsetOn(pos, shape, 1.0, 0.5, 0.5),
-        };
-        for (Vec3 aim : aims) {
-            Vec3 dir = aim.subtract(eye);
-            if (dir.lengthSqr() < 1.0e-8) continue;
-            Vec3 end = eye.add(dir.normalize().scale(reach));
-            BlockHitResult res = level.clip(new ClipContext(
-                    eye, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
-            if (res.getType() == HitResult.Type.BLOCK && res.getBlockPos().equals(pos)) {
-                return res;
-            }
-        }
-        return null;
-    }
-
-    /**
      * A single ray from the eye to {@code target}'s shape centre — the break-the-occluder
-     * fallback when {@link #reachableHit} finds no clear face: the ray lands on the
+     * fallback when {@link AimGeometry#reachableHit} finds no clear face: the ray lands on the
      * occluder (a leaf / a tight overhead), and we break THAT to open the way. Null on a miss / out
-     * of reach. ({@link #reachableHit} already tries the centre first, so if that hit the target it
+     * of reach. (The shared criterion already tries the centre first, so if that hit the target it
      * would have returned it; reaching here means the centre ray hits something else.)
      */
     private BlockHitResult centerRaycast(BlockPos target) {
         Level level = player.level();
         Vec3 eye = player.getEyePosition();
-        double reach = com.dwinovo.numen.core.pathing.moves.AimGeometry.blockReachDistance(player);
+        double reach = AimGeometry.interactionReach(player);
         Vec3 center = Vec3.atCenterOf(target);
         Vec3 dir = center.subtract(eye);
         if (dir.lengthSqr() < 1.0e-8) {
@@ -342,15 +300,6 @@ public final class BlockDigger {
         BlockHitResult res = level.clip(new ClipContext(
                 eye, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
         return res.getType() == HitResult.Type.BLOCK ? res : null;
-    }
-
-    /** A point on the block's shape:
-     *  {@code min*m + max*(1-m)} on each axis. */
-    private static Vec3 offsetOn(BlockPos pos, VoxelShape shape, double mx, double my, double mz) {
-        double x = shape.min(Direction.Axis.X) * mx + shape.max(Direction.Axis.X) * (1 - mx);
-        double y = shape.min(Direction.Axis.Y) * my + shape.max(Direction.Axis.Y) * (1 - my);
-        double z = shape.min(Direction.Axis.Z) * mz + shape.max(Direction.Axis.Z) * (1 - mz);
-        return new Vec3(pos.getX() + x, pos.getY() + y, pos.getZ() + z);
     }
 
 }

@@ -102,6 +102,92 @@ public final class InputDriver {
         halt(p);
     }
 
+    // ---- 飞行输入(创造/旁观这类"允许飞"的画像;见 core 的 FlightDrive) ----
+
+    /**
+     * 竖直推力的倍率。<b>抄的是原版客户端的那一行</b>
+     * ({@code LocalPlayer.aiStep}:{@code i * abilities.getFlyingSpeed() * 3.0})——
+     * 创造模式飞行的上升/下降本来只存在于客户端,服务端身体没有客户端替她按键,
+     * 这里按同一份常数补上,手感才和真玩家一致(0.05 × 3 = 0.15/刻的冲量)。
+     */
+    private static final double FLIGHT_THRUST_SCALE = 3.0;
+
+    /**
+     * 起飞:{@code abilities.flying} 置真,并<b>把这一位通告出去</b>。
+     *
+     * <p>这具身体没有客户端,于是原版那条"双击空格 → 客户端把 flying 报到服务端"
+     * ({@code ServerboundPlayerAbilitiesPacket} → {@code ServerGamePacketListenerImpl.
+     * handlePlayerAbilities})永远不会发生:能力位里的 {@code flying} 一直是 false,
+     * 而 {@code Player.travel} 的飞行分支只在它为真时才走。她在创造模式下"飞不起来"
+     * 的病根就在这里——不是没被允许(mayfly 由原版按模式给了),是从来没有人替她把
+     * 那一键按下去。
+     *
+     * <p>{@code onUpdateAbilities()} 是原版的通告口(把整份 abilities 发出去)。自己
+     * 那次发送的接收端是一个空壳连接,所以它真正的价值在另一半:凡是后续会给她发
+     * 能力包的路径(切模式、重生)拿到的都是同一份事实,而不是两个地方各记一半。
+     */
+    public static void flightStart(ServerPlayer p) {
+        if (p.getAbilities().flying) {
+            return;   // 已经在飞:不重复发包
+        }
+        p.getAbilities().flying = true;
+        p.onUpdateAbilities();
+    }
+
+    /**
+     * 收飞:{@code flying} 清零并通告。
+     *
+     * <p><b>每一次飞行收场都必须走这里</b>(到点、被取消、被抢占、切回生存)。留着
+     * {@code flying=true} 的身体不会自己落地——飞行分支不施重力,她只会一直飘着;
+     * 而且这一位是<b>随 .dat 存档</b>的,休眠再回来还飘着。
+     */
+    public static void flightStop(ServerPlayer p) {
+        if (!p.getAbilities().flying) {
+            return;
+        }
+        p.getAbilities().flying = false;
+        p.onUpdateAbilities();
+    }
+
+    /**
+     * 飞行前进:朝 {@code target} 压前进键,并按 {@code dir} 给一次竖直推力。
+     *
+     * <p>水平方向与原版一致:飞行时 {@code moveRelative} 取的是朝向的水平分量
+     * (俯仰只影响视线),所以只要把身体转向去处、把前进键按住。
+     *
+     * @param dir 竖直推力方向(-1 下 / 0 不推 / +1 上),由纯判据给出
+     *            (见 {@code FlightPlan.verticalThrust} 的死区)
+     */
+    public static void flyToward(ServerPlayer p, Vec3 target, int dir) {
+        faceYaw(p, target);
+        p.setXRot(0.0f);   // 平视:飞行时俯仰不驱动水平移动,只决定画面上她望着哪
+        p.zza = 1.0f;
+        p.xxa = 0.0f;
+        p.setSprinting(false);   // 疾跑会让飞行速度翻倍(getFlyingSpeed 的冲刺档),巡航不要它
+        thrust(p, dir);
+    }
+
+    /** 原地竖直飞(爬升/下落):横不动,只推高度。 */
+    public static void flyVertical(ServerPlayer p, int dir) {
+        p.zza = 0.0f;
+        p.xxa = 0.0f;
+        p.setSprinting(false);
+        thrust(p, dir);
+    }
+
+    /**
+     * 竖直冲量。飞行分支把重力项丢掉、只把原有竖直速度乘 0.6 留下
+     * (见 {@code Player.travel}),所以"升/降"在这里表现为每刻往速度上加一下——
+     * 与原版按住空格/潜行键完全同一条路。
+     */
+    private static void thrust(ServerPlayer p, int dir) {
+        if (dir == 0) {
+            return;
+        }
+        p.setDeltaMovement(p.getDeltaMovement().add(0.0,
+                dir * p.getAbilities().getFlyingSpeed() * FLIGHT_THRUST_SCALE, 0.0));
+    }
+
     /** Zero all locomotion input. Call each tick while idle/arrived. */
     public static void halt(ServerPlayer p) {
         p.zza = 0.0f;

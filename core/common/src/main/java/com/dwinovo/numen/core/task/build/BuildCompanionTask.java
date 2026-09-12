@@ -5,6 +5,7 @@ import com.dwinovo.numen.core.pathing.bridge.ContextFactory;
 import com.dwinovo.numen.core.pathing.cache.LoadedOnlyView;
 import com.dwinovo.numen.core.pathing.calc.NavGoal;
 import com.dwinovo.numen.core.pathing.goal.GoalCompiler;
+import com.dwinovo.numen.core.pathing.moves.AimGeometry;
 import com.dwinovo.numen.core.pathing.moves.CalculationContext;
 import com.dwinovo.numen.core.pathing.moves.MovementHelper;
 import com.dwinovo.numen.core.pathing.moves.movements.BuildPlacementRegistry;
@@ -21,8 +22,12 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -36,12 +41,38 @@ import java.util.Map;
  * 多格建造任务:赴工地、在工地里施工、逐批落位。
  *
  * <p><b>施工模型</b>——同伴走到工地,然后在工地范围内一批一批地把方块落进世界,
- * 伴随朝向、挥手、粒子与音效。她不逐格走到每个方块旁边,也不需要"够得着"。
+ * 伴随朝向、挥手、粒子与音效。
  *
- * <p>这是刻意的产品选择,不是偷懒。逐格走位是<b>客户端自动化模组</b>的生存约束
- * ——它必须让服务端看起来像有人在按键。我们是服务端模组,从来不需要骗谁;为那条
- * 约束付出的代价(站位求解、落脚点重试、视线射线、臂展判定、脚手架自救)全是
- * 为不存在的问题写的,并且把"高层够不着"变成了盖不完房子的硬天花板。
+ * <p><b>两条车道,口径不同,分界是"这一笔算不算玩家动作"</b>
+ * <ul>
+ *   <li><b>玩家动作车道</b>:不带任何摆放要求的单格 {@code set}(→ {@link #placeWithItem})
+ *       与清障破坏(→ {@link #clear})。这两笔在玩家眼里就是"她伸手放了一块 / 挖了一格",
+ *       所以必须先满足<b>够得着 + 看得到</b>才准许执行。
+ *       <ul>
+ *         <li><b>够得着</b> = 眼到瞄点 ≤ 触及距离(生存 4.5 / 创造 5.0,并夹在服务端
+ *             数据包层的 6 格硬边界内,见 {@link AimGeometry#interactionReach});</li>
+ *         <li><b>看得到</b> = 从眼到该瞄点的轮廓射线首命中,要么什么都没有,要么就是
+ *             <b>这一格自己</b>。命中别的方块 = 被挡住——隔着一堵墙的射线必然先打到墙。</li>
+ *         <li>放置还要多一道:必须解出一次<b>真命中面</b>(点目标格本体,或点某个邻格
+ *             朝它的那一面)。空气格没有轮廓、点不中,所以"往空格里放"必然经由邻格的
+ *             贴面完成——这正是原版客户端会发出的那个 hit。穿墙的射线解不出这个命中,
+ *             于是隔墙放置不可能发生。</li>
+ *         <li>够不着就走去离这一格最近的既有巡视点再试({@link #approachCell});看不见
+ *             先换面(六面全枚举,俯视往脚下放、转身往身后放都算合法),实在不行如实失败。</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>图纸车道</b>:带朝向/半砖等细节的 {@code set} 与 box/walls/roof/blueprint。
+ *       它们是<b>照图直写</b>的世界编辑语义,不是玩家动作(见 {@link #processCell} 里那段
+ *       说明),因此不受上面那两道闸约束——受约束的话,一栋屋子只有外沿 2.5 格宽的一圈
+ *       能盖,整件产品就废了。</li>
+ * </ul>
+ *
+ * <p><b>为什么玩家动作车道必须自己补这两道闸</b>:原版里它们分居两处——数据包层
+ * ({@code ServerGamePacketListenerImpl.handleUseItemOn} / {@code handleBlockBreakAction})
+ * 卡"眼到方块中心 ≤ 6 格",客户端射线负责"看得见"(服务端从不校视线);
+ * 而 {@code ServerPlayerGameMode.useItemOn} 自己既不校距离也不校视线(1.20.1 反汇编确认)。
+ * 我们不过数据包、直接调 gameMode,还把命中面合成出来的话,这两道闸就一道都不在场:
+ * 她能在十几格外、隔着一堵墙把方块放进屋里。这条车道既然是"模仿玩家动作",闸就得自己装。
  *
  * <p>保留下来的是真正属于我们的东西:生存模式逐格扣料、清障掉落、期望状态精确
  * 落位、以及"支撑还没长出来就先放着,下一遍再来"的分遍推进。
@@ -72,6 +103,8 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private static final int WANDER_WALK_TICKS = 40;
     /** 连续几遍零进展才升级处置。 */
     private static final int MAX_BARREN_PASSES = 3;
+    /** 够不着时要挪窝:先停这么多刻让她真的迈开腿,而不是在同一刻里把整层格子空翻一遍。 */
+    private static final int APPROACH_PAUSE_TICKS = 10;
 
     /**
      * 写入标志:{@code UPDATE_CLIENTS}(同步给客户端)+ {@code UPDATE_KNOWN_SHAPE}
@@ -467,7 +500,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
      * 处理一格。
      *
      * @return 落位后的期望状态(有产出);null = 本遍先放下(已达标/缺料/她自己
-     *         正站在这格里)
+     *         正站在这格里/够不着看不见/挡路的东西清不掉)
      */
     private BlockState processCell(BuildTaskRecord.Target target) {
         BlockPos pos = target.pos();
@@ -522,7 +555,12 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         }
 
         if (occupied) {
-            clear(pos);
+            // 破坏也是玩家动作,同样先够得着 + 看得见才准动手(见 clear)。
+            // 够不着就先去最近的站位,下一遍再清——绝不隔墙掏别人的方块。
+            if (!clear(pos)) {
+                approachCell(pos);
+                return null;
+            }
             if (BuildCellRules.isAirTarget(target)) {
                 markObserved(target, true);
                 return desired;
@@ -534,7 +572,14 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         }
 
         if (target.itemPlace()) {
-            placeWithItem(target, pos);
+            // 门禁在解命中里:射线解不出可点的面,就是这一刻够不着 / 看不见 / 没贴面,
+            // 本遍放下,先去离这一格最近的站位再试。
+            BlockHitResult hit = resolvePlaceHit(pos);
+            if (hit == null) {
+                approachCell(pos);
+                return null;
+            }
+            placeWithItem(target, pos, hit);
             // 落没落成看世界,不看返回值:物品的 place 可以吃掉点击却什么都没放。
             // 拒收(保护、事件被取消、立不住)就本遍放下——零进展遍机制照常裁决。
             BlockState now = player.level().getBlockState(pos);
@@ -546,6 +591,10 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             return now;
         }
 
+        // 图纸车道:照图直写,不受"够得着 + 看得到"约束。这一格要的是精确状态而不是
+        // "她伸手放了一块",把它按玩家动作禁掉,一栋屋子就只剩外沿能盖——世界编辑与
+        // 玩家动作是两种语义,分界见类文档。
+        //
         // 写不进去就什么都不算:setBlock 在超出建造高度时直接返回假、世界毫无变化。
         // 照样扣料 + 记一笔 placed 的后果是,那一格永远对不上、每遍重来,三遍下来
         // 材料凭空消失三倍,而进度报的比实际多三倍。hopeless 已经把这类格从分母里
@@ -649,21 +698,122 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     }
 
     /**
+     * 解一次"真客户端会发出的那个命中面"——放置门禁的第二道闸。
+     *
+     * <p>两条路,都要求射线<b>首命中</b>就是打算点的那个方块(首命中别的方块 = 被挡住):
+     * <ol>
+     *   <li>点目标格本体:高草、雪层这类可替换方块自带轮廓,原版会把方块落在被点的那一格;</li>
+     *   <li>换面:六个方向逐个试"点邻格朝目标格的那一面"(搭桥、垫柱、俯视往脚下放都住在这里)。
+     *       邻格必须<b>不可替换</b>,否则原版会把方块落进邻格而不是目标格。</li>
+     * </ol>
+     *
+     * <p>射线长度就是触及距离,所以"够不着"与"看不见"在这里是同一件事:解不出命中。
+     * 调用方据此本遍放下这一格,先走去最近的站位。
+     *
+     * @return 可点的命中;null = 这一刻没有可点的面(够不着 / 看不见 / 无处可贴)
+     */
+    private BlockHitResult resolvePlaceHit(BlockPos pos) {
+        Level level = player.level();
+        Vec3 eye = player.getEyePosition();
+        double reach = AimGeometry.interactionReach(player);
+        for (Vec3 aim : AimGeometry.cellAimPoints(pos)) {
+            BlockHitResult self = clipRay(eye, aim, reach, pos);
+            if (self != null) {
+                return self;
+            }
+        }
+        for (AimGeometry.SupportFace support : AimGeometry.supportFaces(pos)) {
+            if (level.getBlockState(support.against()).canBeReplaced()) {
+                continue;   // 可替换的邻格会把方块落进它自己,点它放不出目标格
+            }
+            BlockHitResult hit = clipRay(eye, support.point(), reach, support.against());
+            if (hit != null && hit.getDirection() == support.face()
+                    && hit.getBlockPos().relative(hit.getDirection()).equals(pos)) {
+                return hit;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 从眼到瞄点的轮廓射线:首命中必须是 {@code expect} 那一格,否则算被挡住。
+     * 射线长度取触及距离 —— 远处解不出命中,于是"够不着"和"看不见"在这里是同一个 null。
+     */
+    private BlockHitResult clipRay(Vec3 eye, Vec3 aim, double reach, BlockPos expect) {
+        Vec3 dir = aim.subtract(eye);
+        if (dir.lengthSqr() < 1.0e-8) {
+            return null;   // 她正站在这格里:没有视线可言
+        }
+        BlockHitResult hit = player.level().clip(new ClipContext(eye,
+                eye.add(dir.normalize().scale(reach)),
+                ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
+        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(expect)) {
+            return null;
+        }
+        // 数据包层还有"眼到被点方块中心 ≤ 6 格"这一道(我们不走数据包,自己补)
+        return AimGeometry.withinServerLimit(eye, hit.getBlockPos()) ? hit : null;
+    }
+
+    /**
+     * 够不着 / 看不见这一格:把下一段走位指到离它最近的既有巡视点,走过去再试。
+     *
+     * <p>复用既有站位目标(巡视点)而不是另起一套逐格站位求解:施工本来就绕着工地走,
+     * 卡住的那一格只需要她挪到离它最近的那个站处。已经站在那儿还够不着,就不再空转
+     * ——交回分遍推进去判"零进展",由收尾如实报告,不粉饰。
+     */
+    private void approachCell(BlockPos pos) {
+        Vec3 best = nearestWanderPoint(pos);
+        if (best == null) {
+            return;
+        }
+        if (wanderTarget != null && wanderTarget.distanceToSqr(best) < 4.0) {
+            return;   // 已经在往那一带走:反复换目标只会让寻路一次次重启
+        }
+        if (wanderTarget == null && player.position().distanceToSqr(best) < 4.0) {
+            return;   // 已经站在那个站处了:再走一趟也是这里,交回分遍推进去裁决
+        }
+        stopNav();
+        wanderTarget = best;
+        wanderTicks = 0;
+        workPause = Math.max(workPause, APPROACH_PAUSE_TICKS);   // 让她先迈步,别在同一刻里空翻格子
+    }
+
+    /** 离这一格最近的巡视点;没有巡视点(空工地)返回 null。 */
+    private Vec3 nearestWanderPoint(BlockPos pos) {
+        if (wanderPoints.isEmpty()) {
+            return null;
+        }
+        double x = pos.getX() + 0.5;
+        double z = pos.getZ() + 0.5;
+        Vec3 best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (Vec3 point : wanderPoints) {
+            double dx = point.x - x;
+            double dz = point.z - z;
+            double d = dx * dx + dz * dz;
+            if (d < bestDist) {
+                bestDist = d;
+                best = point;
+            }
+        }
+        return best;
+    }
+
+    /**
      * 原生车道:把这件物品拿在手里,对目标格来一次真右键({@code gameMode.useItemOn})。
      *
-     * <p>图纸格照图直写是对的——精确落位是它的语义;而没提任何摆放要求的单格 set
-     * 要的是"放一个工作台",那是玩家动作:朝向随她的视线,模组钩在物品放置流程上的
-     * 转换(换方块、造方块实体)照常发生,放置事件可被领地类模组取消——她放不了的
-     * 地方,主人亲手也放不了。扣料也交给原版从手上的那叠扣,与
+     * <p>没提任何摆放要求的单格 set 要的是"放一个工作台",那是玩家动作:朝向随她的视线,
+     * 模组钩在物品放置流程上的转换(换方块、造方块实体)照常发生,放置事件可被领地类模组
+     * 取消——她放不了的地方,主人亲手也放不了。扣料也交给原版从手上的那叠扣,与
      * {@code BuildInventory.consumeOne} 同一判据(都按 {@code hasInfiniteMaterials})。
      *
      * <p>只按主手,不走 {@code Interaction} 的双手按键:那是准星语义(主手没吃掉就轮
      * 副手),在这里副手若拿着别的方块,会把错的东西放进格子。
      *
-     * <p>命中点合成在格子中心:格内是可替换方块时 {@code BlockPlaceContext} 原地落位,
-     * 不需要邻面,悬空格也放得出——能不能立住由原版 {@code canSurvive} 说了算。
+     * <p>命中面由 {@link #resolvePlaceHit} 沿真实射线解出后传进来,这里不再自己合成
+     * ——合成命中就等于把原版的"够得着 + 看得见"两道闸一起拆了(见类文档)。
      */
-    private void placeWithItem(BuildTaskRecord.Target target, BlockPos pos) {
+    private void placeWithItem(BuildTaskRecord.Target target, BlockPos pos, BlockHitResult hit) {
         ItemStack restore = null;
         if (r.consumeMaterials) {
             int slot = inv.findSlot(target.item(), true);
@@ -677,12 +827,10 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND,
                     new ItemStack(target.item()));
         }
-        InputDriver.lookAt(player, Vec3.atCenterOf(pos));
+        InputDriver.lookAt(player, hit.getLocation());
         try {
             var result = player.gameMode.useItemOn(player, player.level(),
-                    player.getMainHandItem(), net.minecraft.world.InteractionHand.MAIN_HAND,
-                    new net.minecraft.world.phys.BlockHitResult(
-                            Vec3.atCenterOf(pos), net.minecraft.core.Direction.UP, pos, false));
+                    player.getMainHandItem(), net.minecraft.world.InteractionHand.MAIN_HAND, hit);
             if (result.consumesAction()) {
                 player.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
             }
@@ -700,12 +848,24 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
      * 不是镐。所以石头与矿石这一类清了不掉东西——"归玩家"只在不需要工具的方块上
      * 成立。要让它全成立就得在清障前临时换成镐,那会和演出打架,故此处照实记下。
      * 破坏特效走原版 levelEvent,音效与碎屑与玩家自己挖一模一样。
+     *
+     * <p><b>动手前先过门禁:够得着 + 看得见</b>。此前这里直接 {@code setBlock(空气)},
+     * 原版那两道闸(数据包层的距离、客户端射线的视线)一道都不在场——她能在十几格外、
+     * 隔着一堵墙把别人屋里的墙掏空。线下的挖掘({@code BlockDigger})本来就走
+     * {@link AimGeometry#reachableHit} 那条真射线,这里改用同一处判据
+     * ({@link AimGeometry#assess}),破坏侧从此只有一个真源。
+     *
+     * @return true = 这一格现在不挡路了(清掉了,或者本来就没东西);
+     *         false = 这一刻够不着/看不见,本遍放下,先去最近的站位
      */
-    private void clear(BlockPos pos) {
+    private boolean clear(BlockPos pos) {
         var level = player.level();
         BlockState state = level.getBlockState(pos);
         if (state.isAir()) {
-            return;
+            return true;
+        }
+        if (AimGeometry.assess(player, pos) != AimGeometry.Access.OK) {
+            return false;
         }
         if (r.consumeMaterials) {
             try {
@@ -723,6 +883,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         level.levelEvent(2001, pos, net.minecraft.world.level.block.Block.getId(state));
         level.setBlock(pos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), PLACE_FLAGS);
         r.brokeOne();
+        return true;
     }
 
     /**
@@ -765,8 +926,9 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             }
             // 挪了窝也补不上:留案再交代。盖不完就是盖不完,不粉饰成成功。
             dumpOutstanding();
-            fail(diagnoseOutstanding() + "; built " + r.completed() + "/" + r.targets.size(),
-                    FailureType.NO_PATH);
+            Diagnosis diagnosis = diagnoseOutstanding();
+            fail(diagnosis.reason() + "; built " + r.completed() + "/" + r.targets.size(),
+                    diagnosis.type());
             return TaskState.FAILED;
         }
         // 零进展而且不是断料:那多半是她自己站在剩下的格子里。这时候挪窝是对症的
@@ -807,25 +969,35 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             BlockPos pos = target.pos();
             BlockState desired = target.desiredState();
             com.dwinovo.numen.core.Constants.LOG.info(
-                    "[numen-build] 缺 {} 期望={} 实际={} 立得住={} 占身={} 有料={}",
+                    "[numen-build] 缺 {} 期望={} 实际={} 立得住={} 占身={} 有料={} 门禁={}",
                     pos.toShortString(), desired, rules.peek(pos),
                     desired.canSurvive(player.level(), pos), rules.blockedByEntity(pos, desired),
-                    !r.consumeMaterials || inv.hasItem(target.item(), true));
+                    !r.consumeMaterials || inv.hasItem(target.item(), true),
+                    AimGeometry.assess(player, pos));   // 够不够得着 / 看不看得见,一并留案
         }
     }
+
+    /** 收不了尾的病因:给人话理由,另带一个结构化起因供恢复阶梯分支。 */
+    private record Diagnosis(String reason, FailureType type) {}
 
     /**
      * 收不了尾时的病因分类。
      *
-     * <p>剩下的格子放不下去只有四种可能,而玩家的应对完全不同:让占着的人挪开、
-     * 让拆的人住手、去补材料、或者认下图纸里原版不允许的那几格。所以必须分开报,
-     * 不能笼统一句 "could not be placed" —— 判据本来就算出来了,裁决做了却不交代
-     * 理由,和没裁决一样难用。
+     * <p>剩下的格子放不下去只有几种可能,而玩家的应对完全不同:让占着的人挪开、
+     * 让拆的人住手、去补材料、走过去够近一点、或者认下图纸里原版不允许的那几格。
+     * 所以必须分开报,不能笼统一句 "could not be placed" —— 判据本来就算出来了,
+     * 裁决做了却不交代理由,和没裁决一样难用。
+     *
+     * <p>"够不着"与"看不见"单列一档(2026-02 加的门禁):它们此前会一路落进
+     * "原版物理立不住"那一档——而那一档的处方是"改图纸",门禁的处方是"走过去/绕过去"。
+     * 归错档,模型就会去改一张本来没错的图纸。
      */
-    private String diagnoseOutstanding() {
+    private Diagnosis diagnoseOutstanding() {
         int occupied = 0;
         int unsupported = 0;
         int broke = 0;
+        int outOfReach = 0;
+        int hidden = 0;
         BlockPos sample = null;
         for (BuildTaskRecord.Target target : r.targets) {
             BlockPos pos = target.pos();
@@ -842,8 +1014,15 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                 sample = pos;
             }
             BlockState desired = target.desiredState();
+            // 门禁先判:够不着/看不见的处方是"走过去、绕过去",不是"改图纸"。
+            // 放在 canSurvive 之前,免得它们被归进"原版物理立不住"那一档。
+            AimGeometry.Access access = AimGeometry.assess(player, pos);
             if (rules.blockedByEntity(pos, desired)) {
                 occupied++;
+            } else if (access == AimGeometry.Access.TOO_FAR) {
+                outOfReach++;
+            } else if (access == AimGeometry.Access.OCCLUDED) {
+                hidden++;
             } else if (!desired.canSurvive(player.level(), pos)) {
                 unsupported++;
             } else {
@@ -860,12 +1039,27 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             parts.add(unsupported + " that vanilla physics will not hold at that spot"
                     + " (the blueprint asks for something impossible there)");
         }
+        if (outOfReach > 0) {
+            parts.add(outOfReach + " she could not get within arm's length of (she walked the site"
+                    + " and the closest she can stand is still too far) — send her closer, or split"
+                    + " the build into parts she can reach from the ground she is allowed to stand on");
+        }
+        if (hidden > 0) {
+            parts.add(hidden + " she has no line of sight to (something solid in the way) — she will"
+                    + " not place through a wall, so either clear a way in or build those cells first");
+        }
         if (broke > 0) {
             parts.add(broke + " that would not stay put"
                     + (damagedCells > 0 ? " — something kept breaking the finished work" : ""));
         }
-        return missing + " cell(s) unbuilt at " + (sample == null ? "?" : sample.toShortString())
-                + (parts.isEmpty() ? "" : ": " + String.join("; ", parts));
+        // 起因只挑一个:混着报的时候"没有路"最中性,也最不会把模型误导到单一处方上
+        FailureType type = FailureType.NO_PATH;
+        if (occupied == 0 && unsupported == 0 && broke == 0) {
+            type = outOfReach >= hidden ? FailureType.OUT_OF_REACH : FailureType.OCCLUDED;
+        }
+        return new Diagnosis(missing + " cell(s) unbuilt at "
+                + (sample == null ? "?" : sample.toShortString())
+                + (parts.isEmpty() ? "" : ": " + String.join("; ", parts)), type);
     }
 
     /** 收工:撤掉自己垫的脚手架、生成摆设、外围补水,放一把庆祝的粒子。 */

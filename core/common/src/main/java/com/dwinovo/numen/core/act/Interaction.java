@@ -4,6 +4,7 @@ import com.dwinovo.numen.entity.InputDriver;
 
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.core.FailureType;
+import com.dwinovo.numen.core.pathing.moves.AimGeometry;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -52,8 +53,6 @@ public final class Interaction {
     public enum Status { RUNNING, DONE, FAILED }
     public enum Button { ATTACK, USE }
 
-    /** Vanilla block-interaction reach (survival); creative is 5. */
-    private static final double REACH = 4.5;
     /** The two hands USE tries, main first (vanilla interaction tries both). */
     private static final InteractionHand[] HANDS = {InteractionHand.MAIN_HAND, InteractionHand.OFF_HAND};
 
@@ -156,7 +155,8 @@ public final class Interaction {
     }
 
     /** Right-click a pre-resolved block hit — placement / precise activation supplies
-     *  the exact support face, so this skips the raycast and presses against {@code hit}. */
+     *  the exact support face, so this skips the raycast and presses against {@code hit}.
+     *  只免掉射线,不免掉玩家边界:够不够得着仍由本类自己校(见 {@code fireUseBlock})。 */
     public static Interaction useBlock(NumenPlayer p, BlockHitResult hit, InteractionHand hand) {
         Interaction i = new Interaction(p, Button.USE, hit.getBlockPos(), null, hand, Timing.once());
         i.presetHit = hit;
@@ -332,6 +332,15 @@ public final class Interaction {
         BlockHitResult hit;
         if (presetHit != null) {
             hit = presetHit;                                  // caller already resolved the support face
+            // 预解析命中是调用方的外科口子(命中面由它保证),但"够得着"不能靠调用方自觉:
+            // 原版数据包层对右键有"眼到方块中心 ≤ 6 格"这道硬边界,超了一律丢掉不执行。
+            // 我们不过数据包,所以在这里补同一道——放行一个够不着的命中就是隔空点方块。
+            if (!AimGeometry.withinServerLimit(player.getEyePosition(), hit.getBlockPos())) {
+                failReason = "the block to use is out of reach";
+                failType = FailureType.OUT_OF_REACH;
+                hardFail = true;
+                return false;
+            }
             InputDriver.lookAt(player, hit.getLocation());
         } else {
             InputDriver.lookAt(player, Vec3.atCenterOf(block));
@@ -425,7 +434,9 @@ public final class Interaction {
         Level level = player.level();
         Vec3 eye = player.getEyePosition();
         Vec3 look = player.getViewVector(1.0f);
-        Vec3 end = eye.add(look.x * REACH, look.y * REACH, look.z * REACH);
+        // 触及距离取唯一真源:创造 5.0、生存按设置(默认 4.5),并夹在数据包层硬边界内。
+        double reach = AimGeometry.interactionReach(player);
+        Vec3 end = eye.add(look.x * reach, look.y * reach, look.z * reach);
         BlockHitResult hit = level.clip(new ClipContext(
                 eye, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player));
         if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(block)) {

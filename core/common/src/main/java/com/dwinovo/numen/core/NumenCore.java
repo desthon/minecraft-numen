@@ -146,6 +146,9 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.agent.TodoWriteTool());   // raw NumenTool
         ToolRegistry.register(new com.dwinovo.numen.core.tools.agent.FindToolsTool());   // raw NumenTool
         ToolRegistry.register(new com.dwinovo.numen.core.tools.agent.LoadSkillTool());   // raw NumenTool
+        // 飞行(创造档的直线飞过去)。登记在末尾而不是插在 goto 旁边:工具顺序是上游
+        // prompt 缓存的键,插队会让所有既有工具的缓存失效一次。
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.work.FlyTool());
     }
 
 
@@ -167,5 +170,9 @@ public final class NumenCore {
         TaskFactory.register(InteractEntityTaskRecord.class, (p, r) -> new InteractEntityCompanionTask(p, r));
         TaskFactory.register(LocateStructureTaskRecord.class, (p, r) -> new LocateStructureCompanionTask(p, r));
         TaskFactory.register(LocateBiomeTaskRecord.class, (p, r) -> new LocateBiomeCompanionTask(p, r));
+        // fly_to:直线飞行的驱动住在 pathing/flight(判据纯函数 + 每刻驱动),
+        // 任务层只做生命周期与回执。
+        TaskFactory.register(com.dwinovo.numen.core.pathing.flight.FlyToTaskRecord.class,
+                (p, r) -> new com.dwinovo.numen.core.pathing.flight.FlyToTask(p, r));
     }
 }
