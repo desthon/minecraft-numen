@@ -53,12 +53,13 @@ tasks.named('sourcesJar', Jar) {
 // 而把关那一步照样会拦 —— 于是每次构建都失败,却不肯自己跑一次 datagen。
 // 同 api 侧:判据要问"东西在不在",不是"目录空不空"(被中断的 datagen 只剩 .cache/)。
 def generatedReady = { -> file('src/generated/resources/data').isDirectory() }
-// 任务名要等到 afterEvaluate 才查得到:loom / ForgeGradle 的 datagen 运行配置是在
-// 各自的 build.gradle 后段才注册的,而本脚本是 plugins{} 块里第一个被应用的。
-afterEvaluate {
-    def datagenTask = tasks.findByName('runDatagen') ?: tasks.findByName('Data')
-    if (datagenTask != null && !generatedReady()) {
-        tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { dependsOn datagenTask }
+// 依赖要给<b>惰性任务集合</b>,不能用 findByName:loom 与 ForgeGradle 各自在它们自己的
+// afterEvaluate 里才注册 datagen 运行配置(名字还一家一个:runDatagen / Data),
+// 而本脚本是 plugins{} 块里最先被应用的 —— 提前查必然拿到 null,补跑就静默失效。
+// 集合形式的 dependsOn 到算任务图时才解析,名字对不对、注册得多晚都不影响。
+if (!generatedReady()) {
+    tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { t ->
+        t.dependsOn(t.project.tasks.matching { d -> d.name == 'runDatagen' || d.name == 'Data' })
     }
 }
 tasks.named('jar', Jar) {
