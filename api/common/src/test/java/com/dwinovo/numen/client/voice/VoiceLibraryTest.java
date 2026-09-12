@@ -192,6 +192,59 @@ class VoiceLibraryTest {
         assertNull(lib.resolve(null), "null 同伴:静音,不抛");
     }
 
+    // ---- 静音成因:resolve 给 null 时界面靠它决定说哪句话 ----
+
+    /** 三种静音各对应一种成因——界面据此选文案,不能张冠李戴。 */
+    @Test
+    void mutedReasonNamesEachCause() {
+        VoiceLibrary lib = fresh();
+        UUID u = UUID.randomUUID();
+
+        assertEquals(VoiceLibrary.Muted.NO_BINDING, lib.mutedReason(u), "没绑过 = 没配声线");
+
+        VoiceLibrary.Entry e = openai(lib, "A");
+        com.dwinovo.numen.client.agent.CompanionHome.bind(u,
+                com.dwinovo.numen.client.agent.CompanionHome.Binding.EMPTY.withVoice(e.id()));
+        assertNull(lib.mutedReason(u), "绑了就在出声:没有成因");
+
+        lib.setEnabled(false);
+        assertEquals(VoiceLibrary.Muted.SWITCH_OFF, lib.mutedReason(u), "总开关关着优先于绑定问题");
+
+        lib.setEnabled(true);
+        lib.remove(e.id());
+        assertEquals(VoiceLibrary.Muted.ENTRY_GONE, lib.mutedReason(u), "条目被删 = 绑定悬空");
+    }
+
+    /**
+     * 与 {@link VoiceLibrary#resolve} 同进同出:resolve 给 null ⟺ mutedReason 有成因。
+     * 这两条判据分头写就会漂移——界面说"开关关着"而她其实在出声,比不说还糟。
+     */
+    @Test
+    void mutedReasonAgreesWithResolve() {
+        VoiceLibrary lib = fresh();
+        UUID u = UUID.randomUUID();
+        VoiceLibrary.Entry e = openai(lib, "A");
+
+        assertConsistent(lib, u, "没绑过");
+        com.dwinovo.numen.client.agent.CompanionHome.bind(u,
+                com.dwinovo.numen.client.agent.CompanionHome.Binding.EMPTY.withVoice(e.id()));
+        assertConsistent(lib, u, "绑好且开关开");
+        lib.setEnabled(false);
+        assertConsistent(lib, u, "开关关");
+        lib.setEnabled(true);
+        lib.remove(e.id());
+        assertConsistent(lib, u, "绑定悬空");
+        assertConsistent(lib, null, "null 同伴");
+        lib.setEnabled(false);
+        assertConsistent(lib, null, "null 同伴 + 开关关");
+    }
+
+    private static void assertConsistent(VoiceLibrary lib, UUID u, String what) {
+        boolean silent = lib.resolve(u) == null;
+        boolean hasReason = lib.mutedReason(u) != null;
+        assertEquals(silent, hasReason, what + ": resolve 与 mutedReason 必须同进同出");
+    }
+
     // ---- pending summon (name-keyed, applied when the roster snapshot arrives) ----
 
     @Test

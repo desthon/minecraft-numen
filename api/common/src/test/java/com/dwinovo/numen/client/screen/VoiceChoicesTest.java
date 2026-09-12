@@ -60,6 +60,27 @@ class VoiceChoicesTest {
         assertEquals(VoiceChoices.NONE, c.idAt(0));
     }
 
+    /**
+     * 悬空绑定要能报出来:选中位落回「无」之后,那一格看起来完全像主人自己选的
+     * "静音",他只会听见她哑了却查不出为什么。面板据此补一行说明
+     * ({@code numen.edit.voice_hint_dangling})。
+     */
+    @Test
+    void aDanglingBindingIsReported() {
+        assertTrue(VoiceChoices.of(List.of(entry("voice_a", "阿黎")), "voice_gone", "None").dangling());
+        assertTrue(VoiceChoices.of(List.of(), "voice_gone", "None").dangling(), "库被清空也算掉了");
+    }
+
+    /** 正常选中/未绑定都不是悬空——那一行说明不该在没事的时候出现。 */
+    @Test
+    void aHealthySelectionIsNotReportedAsDangling() {
+        List<VoiceLibrary.Entry> lib = List.of(entry("voice_a", "阿黎"));
+        assertFalse(VoiceChoices.of(lib, "voice_a", "None").dangling());
+        assertFalse(VoiceChoices.of(lib, null, "None").dangling());
+        assertFalse(VoiceChoices.of(lib, "  ", "None").dangling());
+        assertFalse(VoiceChoices.of(lib, VoiceChoices.NONE, "None").dangling());
+    }
+
     /** 条目没名字 = 列表里一行空白:退回 id,至少能对上设置页里的表单。 */
     @Test
     void aNamelessEntryFallsBackToItsId() {
