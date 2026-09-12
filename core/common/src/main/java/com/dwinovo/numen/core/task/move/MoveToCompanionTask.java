@@ -127,7 +127,8 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         //  1. 坐在船上且有明确去处 → 直接驾船渡水(原有行为,一字未改);
         //  2. 没坐船、但这一路被一片开阔水面横着 → 走到岸边放船、上船、渡过去
         //     (见 BoatCrossing;大水域不会让步行 A* 失败,只会让它很慢,所以这个
-        //     决定只能由跨度主动判出来)。
+        //     决定只能由跨度主动判出来)。没船不放弃:包里的木板/原木够,她先自己
+        //     造一条(见 BoatSupply),造好了原样接回这条接力。
         // 其余情况(矿车没有舵、马的寻路仍按步行物理算、FIND 要先扫描、活目标没有
         // 固定终点)直接走步行段;下座驾是步行导航自己的事(PlayerNav)。
         if (!reached() && hasFixedDestination()) {
@@ -395,7 +396,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
      * 船腿的一刻。两种终态分两路:
      * <ul>
      *   <li><b>靠岸</b>——已经在目标处就收工,否则接步行段走完最后一段;</li>
-     *   <li><b>没成</b>(没船 / 放不下 / 上不去 / 搁浅 / 半路被打断)——同样接步行段:
+     *   <li><b>没成</b>(缺料造不出船 / 放不下 / 上不去 / 搁浅 / 半路被打断)——同样接步行段:
      *       到不了目标的船腿不是失败,只是"这条腿到此为止",剩下的路她可以绕、可以游。
      *       原因写进 {@link #boatNote},随结果一起交给模型——<b>没坐成船这件事也得说出来</b>,
      *       不然主人只看到她慢吞吞游过去,不知道中间发生过什么。</li>
@@ -437,14 +438,17 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     // ==================== 船腿(BoatCrossing) ====================
 
     /**
-     * 开工时问一遍"该不该起船腿"。两个便宜的条件(路程够远、包里有船)先做,再花那次
-     * 水面扫描——绝大多数 goto 走不到扫描这一步,顺序因此有意义。成立就把腿换成船腿。
+     * 开工时问一遍"该不该起船腿"。路程这个最便宜的条件先做,再花那次水面扫描:几十格以内
+     * 的 goto 照样一步不花——那才是绝大多数。"包里没船"不再先挡一道,因为现在没船也能
+     * 起腿({@link BoatSupply} 说木板/原木够现造一条,第一棒换成造船),扫描因此要照做;
+     * 它只是一条直线上的几十次立柱查询,相对一次寻路可以忽略。
      */
     private boolean maybeLaunchBoat() {
-        if (repDistance() < BoatPlan.MIN_TRIP || !hasBoat()) {
-            // 不起也要说清为什么:她怎么没坐船,只有这行答得出来
+        if (repDistance() < BoatPlan.MIN_TRIP) {
+            // 不起也要说清为什么:她怎么没坐船,只有这行答得出来。这一支还没盘点家底,
+            // 就按"有船"问一句——路程本来就是它唯一的否决理由,别让 why 扯到材料上去。
             com.dwinovo.numen.core.Constants.LOG.info("[numen-task] goto 不起船腿:{}",
-                    BoatPlan.decide(repDistance(), 0, hasBoat(), false).why());
+                    BoatPlan.decide(repDistance(), 0, BoatSupply.Readiness.HAVE, false).why());
             return false;
         }
         return launchBoat(BoatCrossing.survey(player, blockTarget));
@@ -452,20 +456,33 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
 
     /**
      * 步行打不通时的那一次机会:再问一遍"是不是该用船"。开阔水面在寻路里是<b>可游</b>的,
-     * 于是"路被水挡住"往往表现为"没有路",而船能过去。判据见 {@link BoatPlan}。
+     * 于是"路被水挡住"往往表现为"没有路",而船能过去(没船就先造一条)。判据见
+     * {@link BoatPlan}。
      */
     private boolean tryBoatInstead() {
-        if (!hasBoat()) {
-            return false;
-        }
         return launchBoat(BoatCrossing.survey(player, blockTarget));
     }
 
-    /** 判据 → 日志 → 起腿。两个入口(开工时、无路时)共用这一段。 */
+    /**
+     * 判据 → 日志 → 起腿。两个入口(开工时、无路时)共用这一段。
+     *
+     * <p>判据现在读的是"船能不能到手"(HAVE/MAKE/GATHER),不再是"包里有没有船":
+     * 木料够就是一种到手的方式,而"连木头都没有"是另一条门槛(见
+     * {@link BoatPlan#MIN_SPAN_GATHERED})。
+     */
     private boolean launchBoat(BoatCrossing.Survey survey) {
-        BoatPlan.Decision d = BoatPlan.decide(repDistance(), survey.span(), hasBoat(), false);
+        BoatSupply.Stock stock = BoatCrossing.stockOf(player);
+        BoatSupply.Readiness supply = BoatSupply.readiness(stock);
+        BoatPlan.Decision d = BoatPlan.decide(repDistance(), survey.span(), supply, false);
         com.dwinovo.numen.core.Constants.LOG.info("[numen-task] goto 渡水判据:{}", d.why());
         if (!d.useBoat() || !survey.ready()) {
+            // 判据说不值得(多半是"这点水游过去更快")。但若她本来就差造船的料,那句
+            // "我还差几块木板"要挂进回执:判据的 why 只进日志,主人看不到,而这句是
+            // 他唯一能接手的线索(补料、或者干脆让她别折腾)。
+            if (supply == BoatSupply.Readiness.GATHER) {
+                boatNote = " (no boat, and not enough wood to build one — "
+                        + BoatSupply.plan(stock).shortfall() + "; I went on foot instead)";
+            }
             return false;
         }
         stopNav();
@@ -476,11 +493,6 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     /** 这次 goto 有固定终点(方块/地点)吗。活目标与 FIND 的终点由它们自己决定。 */
     private boolean hasFixedDestination() {
         return r.kind == MoveToTaskRecord.Kind.BLOCK || r.kind == MoveToTaskRecord.Kind.COLUMN;
-    }
-
-    /** 背包里有船吗——任意木种的 {@link net.minecraft.world.item.BoatItem} 都算。 */
-    private boolean hasBoat() {
-        return BoatCrossing.launcherIn(player) != null;
     }
 
     // ==================== 活目标(Kind.ENTITY) ====================

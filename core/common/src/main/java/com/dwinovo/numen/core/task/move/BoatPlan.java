@@ -13,6 +13,11 @@ import java.util.function.IntPredicate;
  *
  * <p>船腿本身还有代价(找岸、放船、上船,任何一步都可能不成),所以门槛不能太低:
  * 一段浅滩就放船,观感上比游过去更蠢。{@link #MIN_SPAN} 与 {@link #MIN_TRIP} 就是这条线。
+ *
+ * <p>没船不等于没有船:木板/原木够的时候她会<b>自己造一条</b>(材料链的判据在
+ * {@link BoatSupply})。造一条要花几步,而"连木头都没有、得先去砍树"是另一回事——
+ * 那是{@link #MIN_SPAN_GATHERED}在量的事。判据因此读的是"船能不能到手"
+ * ({@link BoatSupply.Readiness}),不再是"包里有没有船"这一个布尔量。
  */
 public final class BoatPlan {
 
@@ -29,6 +34,19 @@ public final class BoatPlan {
 
     /** 目的地近于这么多格就别折腾船。短途里"找岸放船"本身就比直线游过去还长。 */
     public static final double MIN_TRIP = 24.0;
+
+    /**
+     * 手上<b>一点造船的木料都没有</b>(要造就得先去砍树)时的跨度门槛。
+     *
+     * <p>{@link #MIN_SPAN} 量的是"起一次船腿"的固定开销——走到岸边、一次右键、上船,
+     * 顺利也要好几秒;这一条量的是"起船腿 + 先备料":找到树、砍下来、把木板拆出来,
+     * 没有工作台还得再做台放台。多一道采集工序,门槛就相应地翻一倍:12 → 24。
+     *
+     * <p>依据是两边的钟:十几格的水她游过去十几秒,而现砍一棵树回来造船是一两分钟
+     * (还得算上找树的脚程)。所以中等跨度上"游过去"不是偷懒,是更划算;只有宽到
+     * 两道工序的差价被水面本身吃掉(24 格以上,撑船也要游一半的时间),备料才值。
+     */
+    public static final int MIN_SPAN_GATHERED = MIN_SPAN * 2;
 
     /**
      * 船身宽 1.375、坐着的人两格高:水面上要连着 {@code 2} 格无碰撞体才过得去。
@@ -52,13 +70,18 @@ public final class BoatPlan {
     public record Decision(boolean useBoat, int span, String why) { }
 
     /**
-     * 该不该起船腿。四个入参都是量:路程多远、途中最长一片开阔水面多宽、包里有没有船、
-     * 人是不是已经在船上。世界读在调用方。
+     * 该不该起船腿。入参都是量:路程多远、途中最长一片开阔水面多宽、船能不能到手
+     * ({@link BoatSupply.Readiness})、人是不是已经在船上。世界读在调用方。
      *
      * <p>已经在船上不算"该起船腿":那不是要起一次,而是已经在渡水了(任务层直接接
      * BoatNav,见 {@code BoatCrossing.aboard})。
+     *
+     * <p>没船但木料够(MAKE)照起:造一条船是几步合成,比游一片大水便宜得多,没有理由
+     * 因为"她手里不是成品"就放弃。木料也没有(GATHER)时,这道门槛才要往上抬一档
+     * (见 {@link #MIN_SPAN_GATHERED});抬到仍然过线的水面,她就照走船腿,由造那一步
+     * 如实报出缺什么——那句话比"默默游过去"有用。
      */
-    public static Decision decide(double tripDistance, int waterSpan, boolean hasBoat,
+    public static Decision decide(double tripDistance, int waterSpan, BoatSupply.Readiness supply,
                                   boolean alreadyBoating) {
         if (alreadyBoating) {
             return new Decision(false, waterSpan,
@@ -73,12 +96,21 @@ public final class BoatPlan {
             return new Decision(false, waterSpan, "the widest open water on the way is only "
                     + waterSpan + " blocks (needs " + MIN_SPAN + ") — swim or walk it");
         }
-        if (!hasBoat) {
-            return new Decision(false, waterSpan, "the way really is cut by " + waterSpan
-                    + " blocks of open water, but I am not carrying a boat");
-        }
-        return new Decision(true, waterSpan, waterSpan
-                + " blocks of open water lie between here and there, and I have a boat");
+        return switch (supply) {
+            case HAVE -> new Decision(true, waterSpan, waterSpan
+                    + " blocks of open water lie between here and there, and I have a boat");
+            case MAKE -> new Decision(true, waterSpan, waterSpan
+                    + " blocks of open water lie between here and there, and I can build a boat"
+                    + " from the wood I am carrying");
+            case GATHER -> waterSpan >= MIN_SPAN_GATHERED
+                    ? new Decision(true, waterSpan, waterSpan + " blocks of open water lie between"
+                            + " here and there — wide enough to be worth building a boat for"
+                            + " (what wood I am missing will be reported by the making itself)")
+                    : new Decision(false, waterSpan, "the widest open water on the way is only "
+                            + waterSpan + " blocks and I have nothing to build a boat from"
+                            + " (a boat is " + BoatSupply.PLANKS_PER_BOAT + " planks of one wood)"
+                            + " — swimming across beats going to get wood for it");
+        };
     }
 
     /**

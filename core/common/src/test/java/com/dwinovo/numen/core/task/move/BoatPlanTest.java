@@ -16,40 +16,71 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BoatPlanTest {
 
+    private static final BoatSupply.Readiness HAVE = BoatSupply.Readiness.HAVE;
+    private static final BoatSupply.Readiness MAKE = BoatSupply.Readiness.MAKE;
+    private static final BoatSupply.Readiness GATHER = BoatSupply.Readiness.GATHER;
+
     @Test
     void aWideCrossingWithABoatIsWorthIt() {
-        BoatPlan.Decision d = BoatPlan.decide(80.0, 30, true, false);
+        BoatPlan.Decision d = BoatPlan.decide(80.0, 30, HAVE, false);
         assertTrue(d.useBoat(), d.why());
         assertEquals(30, d.span(), "跨度原样带出来给日志/回执");
     }
 
     @Test
-    void withoutABoatWeSwimAndSaySo() {
-        // 回退不是"什么都不做":判据必须说清为什么不起船,那句 why 会进日志给主人看
-        BoatPlan.Decision d = BoatPlan.decide(80.0, 30, false, false);
+    void woodInThePackIsAsGoodAsABoat() {
+        // 没船但有料:造一条是几步合成,没有理由因为"手里不是成品"就放弃一片大水
+        BoatPlan.Decision d = BoatPlan.decide(80.0, 30, MAKE, false);
+        assertTrue(d.useBoat(), d.why());
+        assertTrue(d.why().contains("build a boat"), d.why());
+    }
+
+    @Test
+    void withoutWoodAWideCrossingIsStillWorthTrying() {
+        // 连木头都没有:判据仍放行,由造那一步如实报出缺什么(那句回执比默默游过去有用)
+        BoatPlan.Decision d = BoatPlan.decide(80.0, 30, GATHER, false);
+        assertTrue(d.useBoat(), d.why());
+    }
+
+    @Test
+    void aMediumCrossingWithoutWoodIsSwumInstead() {
+        // 十几格的水游过去十几秒,现砍树回来造船是一两分钟 —— 这一档"游过去"不是偷懒
+        BoatPlan.Decision d = BoatPlan.decide(80.0, 20, GATHER, false);
         assertFalse(d.useBoat());
-        assertTrue(d.why().contains("boat"), d.why());
+        assertTrue(d.why().contains("swimming"), d.why());
+        assertTrue(BoatPlan.MIN_SPAN_GATHERED > BoatPlan.MIN_SPAN,
+                "备料的门槛要比起船的门槛高,否则这条线没有意义");
+        assertFalse(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN_GATHERED - 1, GATHER, false).useBoat());
+        assertTrue(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN_GATHERED, GATHER, false).useBoat(),
+                "正好压线算够");
+    }
+
+    @Test
+    void onlyTheGatheringThresholdMoves() {
+        // 有料(MAKE)时还是原来的 12 格门槛:多出来的那一档只量"要先去弄木头"这件事
+        assertTrue(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN, MAKE, false).useBoat());
+        assertFalse(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN, GATHER, false).useBoat());
     }
 
     @Test
     void aShallowDitchIsNotACrossing() {
         // 门槛下面那一条:10 格水面游过去比"找岸、放船、上船"快
-        assertFalse(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN - 1, true, false).useBoat());
-        assertTrue(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN, true, false).useBoat(),
+        assertFalse(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN - 1, HAVE, false).useBoat());
+        assertTrue(BoatPlan.decide(80.0, BoatPlan.MIN_SPAN, HAVE, false).useBoat(),
                 "正好压线算够");
     }
 
     @Test
     void aShortHopIsNotWorthLaunchingABoat() {
         // 就在湖边二十格外的目的地:直线游过去比把船摆明白还短
-        assertFalse(BoatPlan.decide(BoatPlan.MIN_TRIP - 1, 40, true, false).useBoat());
-        assertTrue(BoatPlan.decide(BoatPlan.MIN_TRIP, 40, true, false).useBoat());
+        assertFalse(BoatPlan.decide(BoatPlan.MIN_TRIP - 1, 40, HAVE, false).useBoat());
+        assertTrue(BoatPlan.decide(BoatPlan.MIN_TRIP, 40, HAVE, false).useBoat());
     }
 
     @Test
     void alreadyAboardIsNotALaunchDecision() {
         // 已经在船上不走这条判据:那是"接着渡水",不是"该不该起船腿"(见 BoatCrossing.aboard)
-        assertFalse(BoatPlan.decide(80.0, 30, true, true).useBoat());
+        assertFalse(BoatPlan.decide(80.0, 30, HAVE, true).useBoat());
     }
 
     @Test
