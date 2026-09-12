@@ -70,7 +70,13 @@ public class MovementTraverse extends Movement {
             double WC = WALK_ONE_BLOCK_COST;
             boolean water = false;
             if (MovementHelper.isWater(pb0) || MovementHelper.isWater(pb1)) {
-                WC = context.waterWalkSpeed;
+                // 流水按顺流 / 横渡 / 逆流分档(见 MovementHelper.waterMoveCost),静水原价。
+                // 流速取"脚"那一格:推的是身体,身体跟着脚所在的格走。
+                WC = MovementHelper.waterMoveCost(context, x, z,
+                        destX, MovementHelper.isWater(pb1) ? y : y + 1, destZ, context.waterWalkSpeed);
+                if (WC >= COST_INF) {
+                    return COST_INF; // 水流的下游是要命的地形(岩浆/悬崖/虚空):这一格不能进
+                }
                 water = true;
             } else {
                 if (destOn.getBlock() == Blocks.SOUL_SAND) {
@@ -125,7 +131,13 @@ public class MovementTraverse extends Movement {
                 return COST_INF;
             }
             double hardness2 = MovementHelper.getMiningDurationTicks(context, destX, y + 1, destZ, pb0, true);
-            double WC = throughWater ? context.waterWalkSpeed : WALK_ONE_BLOCK_COST;
+            double WC = throughWater
+                    ? MovementHelper.waterMoveCost(context, x, z,
+                            destX, MovementHelper.isWater(pb1) ? y : y + 1, destZ, context.waterWalkSpeed)
+                    : WALK_ONE_BLOCK_COST;
+            if (WC >= COST_INF) {
+                return COST_INF; // 与走路分支同一条规则:水流的下游是要命地形时这一格不能进
+            }
             for (int i = 0; i < 5; i++) {
                 int againstX = destX + MovementPlacement.HORIZONTALS_AND_DOWN[i].getStepX();
                 int againstY = y - 1 + MovementPlacement.HORIZONTALS_AND_DOWN[i].getStepY();

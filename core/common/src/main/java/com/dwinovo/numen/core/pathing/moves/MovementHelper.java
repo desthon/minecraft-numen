@@ -135,7 +135,18 @@ public final class MovementHelper {
         FluidState fluidState = state.getFluidState();
         if (!fluidState.isEmpty()) {
             if (fluidState.getAmount() != 8) {
-                return Ternary.NO; // 非满格流体(流动中)不可走
+                // 非满格(流动中):岩浆照旧不可走,横向流水改成可穿。
+                //
+                // "流水是墙"曾经让河道/急流一律绕路或报无路,可原版玩家是能逆流游上去的
+                // (推力 0.014 格/tick 抵不过游泳加速度,见 FlowCost 里的原版事实),
+                // 代价该由 MovementTraverse 按顺流/横渡/逆流分档,而不是一刀切封死。
+                //
+                // 下落水柱不走这一支:原版 FALLING 的流体水量恒为 8
+                // (见 isHorizontalWaterFlow 的注释),推力竖直向下,而执行侧在液体里
+                // 从不按 JUMP(上浮输入),放行它就成了"能规划、走不动"。
+                return NavSettings.get().allowFlowingWater && isHorizontalWaterFlow(fluidState)
+                        ? Ternary.MAYBE
+                        : Ternary.NO;
             }
             return Ternary.MAYBE;
         }
@@ -169,7 +180,10 @@ public final class MovementHelper {
 
         FluidState fluidState = state.getFluidState();
         if (!fluidState.isEmpty()) {
-            if (isFlowing(view, x, y, z, state)) {
+            // 横向流水(非满格水)走的是"泳位"语义:能不能穿只由"头出不出水"决定,
+            // 水流快慢是"价"的问题,不是墙的问题(见 waterMoveCost)。
+            // 其余"可能在流动"的情形(满格源挨着流水、下落水柱)维持旧判:不可穿。
+            if (!isHorizontalWaterFlow(fluidState) && isFlowing(view, x, y, z, state)) {
                 return false; // 水流会把人冲离路径
             }
             if (NavSettings.get().assumeWalkOnWater) {
@@ -738,6 +752,165 @@ public final class MovementHelper {
                 || possiblyFlowing(view.getBlockState(new BlockPos(x - 1, y, z)))
                 || possiblyFlowing(view.getBlockState(new BlockPos(x, y, z + 1)))
                 || possiblyFlowing(view.getBlockState(new BlockPos(x, y, z - 1)));
+    }
+
+    // ==================== 流水穿越 ====================
+
+    /** 水流下游探几格(原版推力是连续矢量,规划里按格近似成"往那边 1~2 格")。 */
+    private static final int PUSHED_CELLS = 2;
+
+    /** 原版按水高缩推力的门槛:{@code maxHeight < 0.4} 才缩,之上是全额推力。 */
+    private static final double MIN_PUSH_HEIGHT = 0.4;
+
+    /**
+     * 是否<b>横向流动的水</b>:非源、水量 1..7、非 FALLING 的水。
+     *
+     * <p>为什么正好是这一组判据(不用再猜):{@code LiquidBlock.initFluidStateCache}
+     * 把方块的 LEVEL 映射成流体状态 —— LEVEL 0 → {@code getSource(false)}
+     * (水量 8、{@code isSource});LEVEL 1..7 → {@code getFlowing(8 - level, false)}
+     * (水量 7..1、{@code FALLING = false});LEVEL ≥ 8 → {@code getFlowing(8, true)}
+     * (水量 8、{@code FALLING = true},即下落水柱)。所以"非源 && 水量 &lt; 8"
+     * 与"横向流水"本就是同一件事;FALLING 那一项只是把它写成显式的,免得将来
+     * 谁改了水量语义没人发现。
+     */
+    public static boolean isHorizontalWaterFlow(FluidState fluidState) {
+        return fluidState.getType() instanceof WaterFluid
+                && !fluidState.isSource()
+                && fluidState.getAmount() < 8
+                && !isFallingWater(fluidState);
+    }
+
+    /**
+     * 下落的水:原版 {@code FlowingFluid.FALLING} 的流体状态(瀑布的水柱)。
+     * 它的 {@code getFlow} 是 {@code (0, -1, 0)}(见 FlowingFluid.getFlow 末尾那段
+     * "FALLING 且旁边有实心面 → 归一化后加 (0,-6,0)"),推力把人往<b>下</b>按;
+     * 而在水里上浮要靠按 JUMP(原版 {@code LivingEntity.aiStep} →
+     * {@code jumpInLiquid} 加 0.04),执行侧的动作里没有这个输入,所以下落水柱维持"不可穿"。
+     */
+    public static boolean isFallingWater(FluidState fluidState) {
+        return fluidState.getType() instanceof FlowingFluid
+                && fluidState.getValue(FlowingFluid.FALLING);
+    }
+
+    /**
+     * 该格流水的水平流速矢量(长度 0..1)。直接问原版 {@code FluidState.getFlow}
+     * ——实体推力的方向就是它({@code Entity.updateFluidHeightAndDoFluidPushing}),
+     * 不自己另造一套近似。不是横向流水、或本地水面没有梯度(静水)→ {@link Vec3#ZERO}。
+     *
+     * <p>线程审计:只读 {@code context.view}(冻结快照)与相邻四格的方块/流体状态,
+     * 与其余成本函数同一把尺,不会解引用玩家或活世界。
+     */
+    public static Vec3 horizontalWaterFlow(CalculationContext context, int x, int y, int z) {
+        FluidState fluidState = context.get(x, y, z).getFluidState();
+        if (!isHorizontalWaterFlow(fluidState)) {
+            return Vec3.ZERO;
+        }
+        Vec3 flow = fluidState.getFlow(context.view, new BlockPos(x, y, z));
+        // 竖直分量不属于"横向流水"(FALLING 的推力另有处置),这里只留水平面内的方向
+        return new Vec3(flow.x, 0, flow.z);
+    }
+
+    /**
+     * 站在该格流水里,水流会不会把人推向要命的地方(岩浆 / 火 / 悬崖 / 虚空),
+     * 该情形下这一格<b>不可规划</b>({@link ActionCosts#COST_INF})。
+     *
+     * <p>为什么必须有这一关:一旦放行流水,规划器就敢走进一块<b>会自己走路的地形</b>
+     * ——原版每 tick 往流向推 0.014 格/tick(见 {@link FlowCost}),水流末端是瀑布、
+     * 岩浆池或峡谷时,人是被"送"进去的,而单格定价看不见这件事。
+     * 判据只看流向的<b>主方向</b>下游 {@link #PUSHED_CELLS} 格:那里是要命方块,
+     * 或者一路下去没有落脚点,就按危险处理。<b>看不清的下游(未加载)一律算危险</b>
+     * ——宁可绕路,不赌一次。
+     *
+     * <p>已知的粗:<b>推力是连续的</b>,这里只按格看两格。人正被推着走时多漂一格、
+     * 恰好漂过崖口的情形管不住 —— 那种情形交给既有的事后机制(动作超时 → 重规划 /
+     * 坠落计价),不在这里假装精确。
+     */
+    public static boolean flowCarriesIntoDanger(CalculationContext context, int x, int y, int z) {
+        return flowCarriesIntoDanger(context, x, y, z, horizontalWaterFlow(context, x, y, z));
+    }
+
+    private static boolean flowCarriesIntoDanger(CalculationContext context, int x, int y, int z, Vec3 flow) {
+        if (flow.lengthSqr() <= 1e-8) {
+            return false; // 静水:谁也不推谁
+        }
+        int stepX = 0;
+        int stepZ = 0;
+        if (Math.abs(flow.x) >= Math.abs(flow.z)) {
+            stepX = flow.x > 0 ? 1 : -1;
+        } else {
+            stepZ = flow.z > 0 ? 1 : -1;
+        }
+        for (int step = 1; step <= PUSHED_CELLS; step++) {
+            int px = x + stepX * step;
+            int pz = z + stepZ * step;
+            if (!context.isLoaded(px, pz)) {
+                return true; // 下游看不清:按危险处理,宁可绕
+            }
+            if (isDeadlyToBePushedInto(context.get(px, y, pz))
+                    || isDeadlyToBePushedInto(context.get(px, y + 1, pz))) {
+                return true; // 被推进岩浆/火里就是没了,这里不讨论"疼不疼"
+            }
+            if (!hasSupportBelow(context, px, y, pz)) {
+                return true; // 一路下去没有落脚点:悬崖 / 峡谷 / 虚空
+            }
+        }
+        return false; // 下游两格都有着落
+    }
+
+    /** 被推着撞上这格会不会要命。比 {@link #avoidWalkingInto} 窄一层:水不算 —— 水就是路。 */
+    private static boolean isDeadlyToBePushedInto(BlockState state) {
+        Block block = state.getBlock();
+        return isLava(state)
+                || block instanceof BaseFireBlock
+                || block == Blocks.MAGMA_BLOCK
+                || block == Blocks.CACTUS
+                || block == Blocks.SWEET_BERRY_BUSH
+                || block == Blocks.BUBBLE_COLUMN
+                || block == Blocks.END_PORTAL;
+    }
+
+    /** (x,y,z) 往下 {@code maxFallHeightNoWater} 格内有没有能停住身体的落点。 */
+    private static boolean hasSupportBelow(CalculationContext context, int x, int y, int z) {
+        int limit = Math.max(1, context.maxFallHeightNoWater);
+        for (int drop = 1; drop <= limit; drop++) {
+            int py = y - drop;
+            if (py <= context.worldBottom) {
+                return false; // 一路到世界底:虚空或深谷
+            }
+            if (canWalkOn(context.view, context.loadedTest, x, py, z)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 穿越一格流水的水价(顺流便宜、横渡原价、逆流贵),危险流向直接
+     * {@link ActionCosts#COST_INF}。不是横向流水就原样返回 {@code baseWaterCost}
+     * ——静水、无水、以及"这就是个普通水格"的情形一格不涨价。
+     *
+     * @param baseWaterCost 该档"没有水流"的水价({@link CalculationContext#waterWalkSpeed})
+     * @return 每格成本(tick);{@link ActionCosts#COST_INF} 表示水流会把人送进危险里
+     */
+    public static double waterMoveCost(CalculationContext context, int fromX, int fromZ,
+                                       int destX, int destY, int destZ, double baseWaterCost) {
+        FluidState fluidState = context.get(destX, destY, destZ).getFluidState();
+        if (!isHorizontalWaterFlow(fluidState)) {
+            return baseWaterCost; // 静水 / 不是水:与放行流水之前同价
+        }
+        Vec3 flow = horizontalWaterFlow(context, destX, destY, destZ);
+        if (flow.lengthSqr() <= 1e-8) {
+            return baseWaterCost; // 本地水面没有梯度:没有推力可言
+        }
+        if (flowCarriesIntoDanger(context, destX, destY, destZ, flow)) {
+            return COST_INF;
+        }
+        // 原版只在"水高 < 0.4 格"时按水高把推力缩一次(脚踝深的水膜几乎推不动),
+        // 0.4 以上一律全额推力。脚按格底算(涉水),深水柱里 getHeight 直接是 1。
+        double heightAboveFeet = fluidState.getHeight(context.view, new BlockPos(destX, destY, destZ));
+        double strength = heightAboveFeet >= MIN_PUSH_HEIGHT ? 1 : heightAboveFeet;
+        return FlowCost.cost(baseWaterCost, destX - fromX, destZ - fromZ, flow.x, flow.z,
+                strength, context.waterDepthStrider);
     }
 
     /**

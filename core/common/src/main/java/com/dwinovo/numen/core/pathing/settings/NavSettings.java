@@ -80,6 +80,15 @@ public final class NavSettings {
     public boolean allowWaterBucketFall = true;
     /** 视水面为可行走地面(默认关,按游泳位语义处理水)。 */
     public boolean assumeWalkOnWater = false;
+    /**
+     * 允许把<b>横向流水</b>(非满格水)当可穿越地形,代价按顺流 / 横渡 / 逆流分档
+     * (见 {@link com.dwinovo.numen.core.pathing.moves.FlowCost})。默认开。
+     *
+     * <p>关掉即退回旧语义:流水是硬墙,河道/急流一律绕路或报无路。留这个开关是为了
+     * 出问题时能一键对比旧行为,不必回滚代码。<b>下落水柱与岩浆不受它影响</b>
+     * ——那两种流体永远不可穿(推力竖直向下 / 要命)。
+     */
+    public boolean allowFlowingWater = true;
     /** 视岩浆面为可行走地面(默认关)。 */
     public boolean assumeWalkOnLava = false;
     /** 假定有自动上台阶能力(上一格无需跳跃)。 */

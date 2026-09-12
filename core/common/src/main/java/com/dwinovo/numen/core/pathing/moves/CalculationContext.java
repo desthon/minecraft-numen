@@ -78,8 +78,14 @@ public class CalculationContext {
     public int maxFallHeightNoWater;
     public final int maxFallHeightBucket;
     public final double fallDamageCostPerPoint;
-    /** 水中行走单格成本(水下速附魔按系数折向平走速度)。 */
+    /** 水中行走单格成本:无附魔 = 水价 20/2.2,深海探索者每级折向平走价,见 {@link WaterCost#cost}。 */
     public final double waterWalkSpeed;
+    /**
+     * 深海探索者等级快照(0..3)。与 {@link #waterWalkSpeed} 取同一档(涉水档),
+     * 只给"流水顺/逆流代价"用:{@link FlowCost} 要拿它算水流占游泳速度的比例
+     * (0 级 ≈ 0.7,3 级 ≈ 0.14 —— 附魔越高水流占比越小)。
+     */
+    public final int waterDepthStrider;
     public final double breakBlockAdditionalCost;
     /** 邻格水的挖掘成本乘数(构造时取样,同一次搜索里一把尺,见 NavSettings 同名项)。 */
     public final double waterAdjacentBreakMultiplier;
@@ -170,7 +176,9 @@ public class CalculationContext {
                 Math.max(settings.maxFallHeightNoWater, survivableFall));
         this.maxFallHeightBucket = settings.maxFallHeightBucket;
         this.fallDamageCostPerPoint = settings.fallDamageCostPerPoint;
-        this.waterWalkSpeed = computeWaterWalkSpeed(player);
+        // 附魔等级只取一次:水价与流速占比必须同一档,否则同一条水路会出现两把尺
+        this.waterDepthStrider = (int) FlowCost.clampDepthStrider(EnchantmentHelper.getDepthStrider(player));
+        this.waterWalkSpeed = WaterCost.cost(this.waterDepthStrider, WaterCost.WADING_DEPTH);
         this.breakBlockAdditionalCost = settings.blockBreakAdditionalPenalty;
         this.waterAdjacentBreakMultiplier = Math.max(1.0, settings.waterAdjacentBreakPenaltyMultiplier);
         this.backtrackCostFavoringCoefficient = settings.backtrackCostFavoringCoefficient;
@@ -251,15 +259,66 @@ public class CalculationContext {
         return level;
     }
 
-    /** 按装备的水下移动效率附魔,把水中步速在水速与平走速之间插值。 */
-    private static double computeWaterWalkSpeed(ServerPlayer player) {
-        // 1.20.1:水下移动效率即深海探索者附魔,乘数 = level/3(1.21 的
-        // WATER_MOVEMENT_EFFICIENCY 属性效果同曲线),无附魔保持 1.0 与原逻辑一致。
-        int depthStrider = EnchantmentHelper.getDepthStrider(player);
-        float waterSpeedMultiplier = depthStrider > 0
-                ? Math.min(1.0f, depthStrider / 3.0f) : 1.0f;
-        return ActionCosts.WALK_ONE_IN_WATER_COST * (1 - waterSpeedMultiplier)
-                + ActionCosts.WALK_ONE_BLOCK_COST * waterSpeedMultiplier;
+    // 水价快照(waterDepthStrider / waterWalkSpeed)在构造器里一次取定,见那两个字段:
+    // 一次搜索只留一个水价。为什么是涉水档:水格的「游泳位」语义让同一趟水路里既有
+    // 踩底的涉水段、也有浮在水柱里的泳道,单值判决不了每一格。涉水档正是改动前那条
+    // 曲线(附魔全额),所以「没附魔」错用的陆价(4.633)纠正回水价(20/2.2 = 9.091);
+    // 附魔那一侧的档位一格不动,浮着(附魔减半)那一档留给 {@link WaterCost#cost} 的另一个入参。
+
+    /**
+     * 水中每格成本的水深 / 深海探索者模型:纯函数,不碰玩家、世界与设置。
+     * 成本以 tick 计(20 tick/s),与 {@link ActionCosts} 其余常量同一把尺。
+     *
+     * <p><b>1.20.1 的原版事实</b>(核对 Gradle 缓存里 mapped jar 的
+     * {@code LivingEntity.travel} 水分支):阻力 {@code f = isSprinting() ? 0.9 :
+     * getWaterSlowDown()}(玩家恒 0.8)、加速度 {@code g = 0.02};
+     * {@code h = min(depthStrider, 3)},离地({@code !onGround()})时 {@code h *= 0.5};
+     * {@code h > 0} 时 {@code f += (0.54600006 - f) * h / 3}、
+     * {@code g += (getSpeed() - g) * h / 3}(玩家 {@code getSpeed() = 0.1},
+     * 正是走路那一档加速度)。也就是说:踩底涉水时 3 级附魔把水速顶到走路速度,
+     * 0 级只剩水速(约 2.2 格/s);浮在水柱里时附魔只算一半。
+     *
+     * <p>于是成本沿用原本那条曲线,在 {@link ActionCosts#WALK_ONE_IN_WATER_COST}
+     * (2.2 格/s)与 {@link ActionCosts#WALK_ONE_BLOCK_COST}(4.317 格/s)之间按
+     * {@code h / 3} 插值——只把「没附魔」从走路价挪回水价。
+     *
+     * <p>为什么放在静态嵌套类里而不是外层:外层有 {@code STACK_BUCKET_WATER}
+     * 这种静态初始化就构造物品的字段,碰外层类得先引导 MC 注册表;嵌套类自己
+     * 初始化,边界单测因此不用引导 MC(与 {@link NavSettings} 的懒加载同源)。
+     */
+    public static final class WaterCost {
+
+        /** 原版的附魔等级上限;{@code EnchantmentHelper} 的返回值可以超过它。 */
+        public static final int MAX_DEPTH_STRIDER = 3;
+
+        /** 脚所在格往下连续水格数:脚下一格不是水 → 踩得到底,涉水,附魔全额。 */
+        public static final int WADING_DEPTH = 1;
+
+        /** 脚所在格往下连续水格数:脚下一格就是水 → 浮在水柱里,附魔减半。 */
+        public static final int FLOATING_DEPTH = 2;
+
+        private WaterCost() {}
+
+        /**
+         * 该档每格的 tick 成本。
+         *
+         * @param depthStriderLevel 深海探索者等级:0 为无,负数按 0,超过 3 按原版上限截断
+         * @param waterDepth        脚所在格往下连续水格的格数(含脚那一格):
+         *                          0 = 无水(陆价);{@link #WADING_DEPTH} = 涉水;
+         *                          {@code >= }{@link #FLOATING_DEPTH} = 浮在水柱里
+         * @return 每格成本(tick)
+         */
+        public static double cost(int depthStriderLevel, int waterDepth) {
+            if (waterDepth <= 0) {
+                return ActionCosts.WALK_ONE_BLOCK_COST; // 没有水,就是陆价
+            }
+            int level = Math.max(0, Math.min(MAX_DEPTH_STRIDER, depthStriderLevel));
+            // 原版在水里离地时 h *= 0.5:浮着的人只吃一半附魔
+            double effective = waterDepth >= FLOATING_DEPTH ? level * 0.5 : level;
+            double landShare = effective / MAX_DEPTH_STRIDER;
+            return ActionCosts.WALK_ONE_IN_WATER_COST * (1 - landShare)
+                    + ActionCosts.WALK_ONE_BLOCK_COST * landShare;
+        }
     }
 
     // ==================== 世界读取 ====================

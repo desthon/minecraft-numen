@@ -144,7 +144,15 @@ public class MovementDescend extends Movement {
                 if (context.assumeWalkOnWater) {
                     return false;
                 }
-                if (MovementHelper.isFlowing(context.view, destX, newY, destZ, ontoBlock)) {
+                // 横向流水现在可以落进去(见 MovementHelper.isHorizontalWaterFlow):
+                // 河道横渡要么从岸边走进泳位,要么从高处落进水里,后者就是这一支。
+                // 下落水柱过不去上面那道 canWalkThrough(水量恒 8),不必在这儿再拦一遍。
+                if (!MovementHelper.isHorizontalWaterFlow(ontoBlock.getFluidState())
+                        && MovementHelper.isFlowing(context.view, destX, newY, destZ, ontoBlock)) {
+                    return false;
+                }
+                if (MovementHelper.flowCarriesIntoDanger(context, destX, newY, destZ)) {
+                    // 水流的下游是要命的地形(岩浆/悬崖/虚空):人一进水就被推着走,这种落点不规划
                     return false;
                 }
                 if (!MovementHelper.canWalkOn(context, destX, newY - 1, destZ)) {
