@@ -132,6 +132,21 @@ public final class VoiceLibrary extends JsonLibrary<VoiceLibrary.Entry> {
         return instance;
     }
 
+    /**
+     * 重新扫盘——与 {@code PersonaLibrary.reload()} 同一制式。
+     *
+     * <p>为什么需要:单例只在第一次 {@code instance()} 时读过一次盘,之后这份内存镜面
+     * 就跟着进程走。而 {@code voice.json} 会被这个进程之外的东西改(手工编辑、换存档
+     * 目录的工具、同步软件),编辑卡每次打开都重扫一遍,看到的才是当下的真源——
+     * 否则主人新建了声线、卡片里却还列着开服那一刻的旧名单,表现就是"音色选不了"。
+     *
+     * <p>重扫安全:所有写入都即时落盘({@link #create}/{@link #update} → save),
+     * 因此盘上那份永远不比内存旧,重扫不会丢掉在途改动。
+     */
+    public void reload() {
+        load();
+    }
+
     // ---- global switch ----
 
     /** 全局语音总开关(缺省 true)。关闭时 {@link #resolve} 一律返回 null。 */

@@ -446,6 +446,12 @@ public final class NumenScreen extends Screen {
             rebuild();
         }
 
+        /** 面板自己换了页/刷新了数据(顺路挖矿子页):控件树与真输入框都归屏幕管,
+         *  所以重建得从这儿走——见 CompanionEditPanel.Host#rebuildPanel。 */
+        @Override public void rebuildPanel() {
+            rebuild();
+        }
+
         @Override public boolean canChooseMode() {
             // 与服务端 applyGameMode 的门同一判据:有 gamemode 权限,或主人本人在创造。
             return minecraft != null && minecraft.player != null
@@ -494,7 +500,9 @@ public final class NumenScreen extends Screen {
 
     // ---- modal cards(召唤/编辑): 居中卡 + 暗幕,当前 tab 内容照常渲染作背景 ----
     private static final int SUMMON_CARD_H = 208;
-    private static final int EDIT_CARD_H = 164;
+    // 编辑卡比召唤卡矮:内容只有五行选择 + 一对动作钮。164 → 196 是加了「顺路挖矿」
+    // 一行(以及声线空态说明那一行会让位)之后的实测高度,面板高 232 仍留得住边距。
+    private static final int EDIT_CARD_H = 196;
     private int modalCardH() { return summoning ? SUMMON_CARD_H : EDIT_CARD_H; }
     private int modalCardW() { return Math.min(320, panelW - 24); }
     private int modalCardX() { return left + (panelW - modalCardW()) / 2; }
