@@ -50,6 +50,16 @@ Below Y 0 every ore is its **deepslate variant** — always pass both ids to `mi
 7. **Bow + arrows**: bow = 3 sticks + 3 string (scan spiders at night and pass their runtime IDs to `attack` for string); arrows = 1 flint + 1 stick + 1 feather → 4 (flint drops from `mine(gravel)` at ~10%, feathers from chickens). Target 32 arrows — more is comfort, not requirement; melee + food covers what arrows don't.
 8. **Top up**: 32+ cooked food, 64+ cobblestone. Re-run `get_self_status` against the "done when" list.
 
+## Skipping the grind: villages
+
+Everything above is the reliable route, not the only one. **If a village is within a few hundred
+blocks, loot it first** — its chests carry iron ingots, cooked food, arrows, tools and emeralds,
+which is most of steps 2-4 for free. Load the village_loot skill for the exact routine
+(locate_structure "#minecraft:village" → walk there → scan_blocks chest/barrel → open and transfer).
+
+Two hard rules when you do: **only world-generated structures** (never your owner's chests), and
+**never hit villagers**.
+
 ## Enchanting
 
 You cannot operate an enchanting table (GUI block). If your owner offers to enchant your gear — Sharpness on the sword, Power on the bow, Efficiency on the pickaxe — accept before moving on; it meaningfully raises dragon-fight odds. Never plan an enchanting step for yourself.

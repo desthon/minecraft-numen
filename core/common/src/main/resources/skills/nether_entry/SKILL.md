@@ -14,7 +14,10 @@ Phase 2 of the dragon route. Build a portal, ignite it, walk through. Actual Net
 
 ## Obsidian (need 10)
 
-Mine it from a **ruined portal** — a structure that's just standing obsidian, no lava-casting. This is the only route: casting your own (water over lava) leaves every fresh obsidian block touching lava, and I refuse to mine fluid-adjacent blocks (it would flood or burn the dig), so a cast wall is unminable by design.
+Two routes. Take the first when a ruined portal exists; the second always works.
+
+**A. Mine a ruined portal (preferred).** It is standing obsidian, already made, with no fluid to
+fight.
 
 1. `locate_structure("#minecraft:ruined_portal")` — searches the whole family and returns the nearest. **Skip `ruined_portal_ocean`** (underwater) if the result names it; re-search or pick a land one — I can't dive.
 2. `equip_item(diamond_pickaxe)` (obsidian needs diamond), `goto` the portal coordinates.
@@ -22,7 +25,26 @@ Mine it from a **ruined portal** — a structure that's just standing obsidian, 
 
 Notes:
 - A portal's frame mixes plain **obsidian** with **crying obsidian** (purple particles). Crying obsidian is a *different block and useless for a portal frame* — `mine(obsidian)` already ignores it, so a single portal may yield fewer than 10. If you come up short, `locate_structure("#minecraft:ruined_portal")` again for the next nearest and top up.
-- If `mine` reports it skipped blocks "against water or lava", that portal sits in a wet/lava pocket — relocate to a cleaner one rather than fighting the fluid.
+- Some ruined portals sit in a lava pocket. If mining starts costing you HP to the lava beside the
+  block you are cutting, relocate to a cleaner portal rather than fighting the fluid.
+
+**B. Cast your own (water over lava).** The classic method, and it works: pour water onto a lava
+pool and the lava it lands on turns to obsidian. What it costs is *care and time*, not permission.
+
+1. Find a lava **pool** you can stand beside safely (`scan_blocks` for `lava` — a pool, not a
+   single source block in a wall).
+2. Stand on solid ground at the edge, **not** over the lava.
+3. `interact_at(button=right, x, y, z, item_id=minecraft:water_bucket)` aimed a couple of cells
+   into the lava surface. Water flows over it and the lava underneath becomes obsidian. Work a few
+   cells at a time — each pour makes a small slab you can step back from.
+4. **Take the water back**: `interact_at(button=right, x, y, z, item_id=minecraft:bucket)` on the
+   water source cell, or the flow keeps spreading and the bucket is gone.
+5. `mine(obsidian, 10)` the slab you cast. Those cells sit on top of the pool, so you are mining
+   *beside* lava — do not walk into the hole you are cutting.
+
+Casting is slower per block and more dangerous than route A, but a ruined portal is rarely where
+you want the frame. Do it when nothing ruined is nearby, or when the owner wants the portal at a
+specific spot.
 
 ## Portal build
 
