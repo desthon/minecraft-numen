@@ -72,3 +72,34 @@ tasks.named('jar', Jar) {
     from({ project(':ai').sourceSets.main.output })
     from({ project(':ui').sourceSets.main.output })
 }
+
+// ── datagen 产物不在仓库里(.gitignore: **/generated/),而语言文件只由它产出 ──────
+//
+// 少了它,打出来的包在界面上显示的不是中文,而是 numen.bubble.thinking / numen.tab.chat
+// 这样的裸键 —— 而且没有任何报错:语言文件缺了,原版 I18n 就原样把键吐出来。
+// CI 是「先 datagenAll 再 build」(见 .github/workflows/publish.yml),但本地直接 build 的人
+// 不少(作者自己也是这么踩进来的),于是这里两道:
+//   1. 本机还没有产物 → 把 datagen 拉进打包(一次性开销);
+//   2. 打完再验一次 jar 里到底有没有语言文件 —— 缺了当场把构建判死。
+// 形状照抄 core/forge 那条 refmap 绞索:坏包不许静默出门。
+def datagenTask = tasks.findByName('runDatagen') ?: tasks.findByName('Data')
+if (datagenTask != null && !file('src/generated/resources').isDirectory()) {
+    tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { dependsOn datagenTask }
+}
+tasks.named('jar', Jar) {
+    doLast {
+        def zf = new java.util.zip.ZipFile(archiveFile.get().asFile)
+        try {
+            boolean hasLang = zf.entries().any {
+                it.name ==~ /assets\/[^\/]+\/lang\/(en_us|zh_cn)\.json/
+            }
+            if (!hasLang) {
+                throw new GradleException("语言文件不在 ${archiveFile.get().asFile.name} 里 —— "
+                        + "界面会显示 numen.* 裸键。datagen 的产物不在仓库里(gitignore),先跑 "
+                        + "`./gradlew datagenAll`(或重新执行本任务:缺产物时它会自动先跑一次 datagen)。")
+            }
+        } finally {
+            zf.close()
+        }
+    }
+}

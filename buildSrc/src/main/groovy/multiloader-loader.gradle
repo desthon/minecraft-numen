@@ -43,3 +43,22 @@ tasks.named('sourcesJar', Jar) {
     dependsOn(configurations.commonResources)
     from(configurations.commonResources)
 }
+
+// ── datagen 产物不在仓库里(.gitignore: **/generated/)──────────────────────────
+//
+// core 这边产出的是标签(do_not_break 里的床/门、垫路料标签……),少了它们规矩会静默失效:
+// 她会拆主人的床、找不到任何可垫的方块,而日志里一句异常都没有。
+// 与 api 那边同一条规矩:缺产物就把 datagen 拉进构建,别让空标签的包混出去。
+def datagenTask = tasks.findByName('runDatagen') ?: tasks.findByName('Data')
+if (datagenTask != null && !file('src/generated/resources').isDirectory()) {
+    tasks.matching { it.name == 'jar' || it.name == 'remapJar' }.configureEach { dependsOn datagenTask }
+}
+tasks.named('jar', Jar) {
+    doFirst {
+        def generated = file('src/generated/resources')
+        if (!generated.isDirectory() || !generated.listFiles()) {
+            throw new GradleException("datagen 产物缺失(${generated}) —— 打出来的包里标签会是空的。"
+                    + "先跑 `./gradlew datagenAll`,或重新执行本任务(缺产物时它会自动先跑 datagen)。")
+        }
+    }
+}
