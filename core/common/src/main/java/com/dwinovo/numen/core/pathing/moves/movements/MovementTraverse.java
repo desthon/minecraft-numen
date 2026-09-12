@@ -70,12 +70,18 @@ public class MovementTraverse extends Movement {
             double WC = WALK_ONE_BLOCK_COST;
             boolean water = false;
             if (MovementHelper.isWater(pb0) || MovementHelper.isWater(pb1)) {
-                // 流水按顺流 / 横渡 / 逆流分档(见 MovementHelper.waterMoveCost),静水原价。
-                // 流速取"脚"那一格:推的是身体,身体跟着脚所在的格走。
-                WC = MovementHelper.waterMoveCost(context, x, z,
-                        destX, MovementHelper.isWater(pb1) ? y : y + 1, destZ, context.waterWalkSpeed);
+                // 水价的档位先按"落脚那格是浮着还是踩得到底"选(见 waterTierCost):
+                // 深水泳道里人是浮着的,原版附魔减半,不能一直按涉水档收钱。
+                // 再交给 waterMoveCost 叠水流:横向流水按顺流 / 横渡 / 逆流分档,
+                // 下落水柱按落差分档(向上贵、向下便宜),两者都不是墙。
+                // 流速/落差取"脚"那一格:推的是身体,身体跟着脚所在的格走。
+                int destFeetY = MovementHelper.isWater(pb1) ? y : y + 1;
+                WC = MovementHelper.waterMoveCost(context, x, z, y,
+                        destX, destFeetY, destZ,
+                        MovementHelper.waterTierCost(context, context.waterWalkSpeed,
+                                destX, destFeetY, destZ));
                 if (WC >= COST_INF) {
-                    return COST_INF; // 水流的下游是要命的地形(岩浆/悬崖/虚空):这一格不能进
+                    return COST_INF; // 水流的下游/水柱底下是要命的地形(岩浆/悬崖/虚空):这一格不能进
                 }
                 water = true;
             } else {
@@ -132,8 +138,10 @@ public class MovementTraverse extends Movement {
             }
             double hardness2 = MovementHelper.getMiningDurationTicks(context, destX, y + 1, destZ, pb0, true);
             double WC = throughWater
-                    ? MovementHelper.waterMoveCost(context, x, z,
-                            destX, MovementHelper.isWater(pb1) ? y : y + 1, destZ, context.waterWalkSpeed)
+                    ? MovementHelper.waterMoveCost(context, x, z, y,
+                            destX, MovementHelper.isWater(pb1) ? y : y + 1, destZ,
+                            MovementHelper.waterTierCost(context, context.waterWalkSpeed,
+                                    destX, MovementHelper.isWater(pb1) ? y : y + 1, destZ))
                     : WALK_ONE_BLOCK_COST;
             if (WC >= COST_INF) {
                 return COST_INF; // 与走路分支同一条规则:水流的下游是要命地形时这一格不能进

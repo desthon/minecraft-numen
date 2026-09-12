@@ -10,6 +10,7 @@ import com.dwinovo.numen.core.pathing.moves.MovementHelper;
 import com.dwinovo.numen.core.pathing.moves.MovementState;
 import com.dwinovo.numen.core.pathing.moves.MovementStatus;
 import com.dwinovo.numen.core.pathing.moves.MutableMoveResult;
+import com.dwinovo.numen.core.pathing.settings.NavSettings;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
@@ -30,6 +31,12 @@ import static com.dwinovo.numen.core.pathing.moves.ActionCosts.WALK_ONE_OVER_SOU
 
 /** 下一格:走下水平相邻且低一格的落点;落点更深时由成本函数移交坠落语义。 */
 public class MovementDescend extends Movement {
+
+    /**
+     * 落进水里时,从扫到的那一格往上最多再找几格才是"泳位"(液面那一格)。
+     * 3 格足够覆盖常见池塘(浮力平衡点就在液面附近,再深也没有意义)。
+     */
+    private static final int SWIM_LANE_LOOKUP = 3;
 
     /** 冲出边缘阶段的计 tick(前 20 tick 冲 fakeDest 加速离沿)。 */
     private int numTicks = 0;
@@ -146,24 +153,48 @@ public class MovementDescend extends Movement {
                 }
                 // 横向流水现在可以落进去(见 MovementHelper.isHorizontalWaterFlow):
                 // 河道横渡要么从岸边走进泳位,要么从高处落进水里,后者就是这一支。
-                // 下落水柱过不去上面那道 canWalkThrough(水量恒 8),不必在这儿再拦一遍。
-                if (!MovementHelper.isHorizontalWaterFlow(ontoBlock.getFluidState())
-                        && MovementHelper.isFlowing(context.view, destX, newY, destZ, ontoBlock)) {
-                    return false;
+                boolean falling = MovementHelper.isFallingWater(ontoBlock.getFluidState());
+                if (falling) {
+                    // 下落水柱也能落进去(本轮把墙改成了价):浮力(每 tick 按跳)会把人
+                    // 挂在水柱里,顺水柱下去比自由落体还稳。底线照旧 —— 水柱底下是岩浆/
+                    // 虚空就不许进,未加载同样不赌(见 fallingWaterTerminatesSafely)。
+                    if (!NavSettings.get().allowFallingWater
+                            || !MovementHelper.fallingWaterTerminatesSafely(
+                                    context.view, context.loadedTest, destX, newY, destZ)) {
+                        return false;
+                    }
+                } else {
+                    if (!MovementHelper.isHorizontalWaterFlow(ontoBlock.getFluidState())
+                            && MovementHelper.isFlowing(context.view, destX, newY, destZ, ontoBlock)) {
+                        return false;
+                    }
+                    if (MovementHelper.flowCarriesIntoDanger(context, destX, newY, destZ)) {
+                        // 水流的下游是要命的地形(岩浆/悬崖/虚空):人一进水就被推着走,这种落点不规划
+                        return false;
+                    }
+                    if (!MovementHelper.canWalkOn(context, destX, newY - 1, destZ)) {
+                        // 水太浅会直接穿透砸到下面的东西
+                        return false;
+                    }
                 }
-                if (MovementHelper.flowCarriesIntoDanger(context, destX, newY, destZ)) {
-                    // 水流的下游是要命的地形(岩浆/悬崖/虚空):人一进水就被推着走,这种落点不规划
-                    return false;
-                }
-                if (!MovementHelper.canWalkOn(context, destX, newY - 1, destZ)) {
-                    // 水太浅会直接穿透砸到下面的东西
-                    return false;
-                }
-                // 落水,不需要水桶
+                // 落水,不需要水桶。落点必须是<b>泳位</b>(可站的水那几层,见
+                // MovementHelper.isSwimLane):湖底那一格在模型里站不住(沉底的人头在水下),
+                // 落在那儿节点就废了 —— 往下循环是从"低 3 格"开始扫的,常常先扫到湖底,
+                // 于是这里要往上一层层找回去,最多找 SWIM_LANE_LOOKUP 格。
+                // 找不到泳位就整趟放弃,让规划器去试"走进水里"那条路。
                 res.x = destX;
-                res.y = newY;
                 res.z = destZ;
                 res.cost = tentativeCost;
+                for (int up = 0; up <= SWIM_LANE_LOOKUP; up++) {
+                    int laneY = newY + up;
+                    if (MovementHelper.canWalkOn(context, destX, laneY, destZ)) {
+                        res.y = laneY;
+                        return false; // 泳位(水面那一格 / 水柱里浮着的那几格)
+                    }
+                    if (!MovementHelper.isFloatableLiquid(context, destX, laneY, destZ)) {
+                        break; // 出了水柱,上面再找也不是水
+                    }
+                }
                 return false;
             }
             if (unprotectedFallHeight <= 11

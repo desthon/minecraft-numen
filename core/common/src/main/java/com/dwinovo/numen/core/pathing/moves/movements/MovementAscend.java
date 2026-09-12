@@ -4,6 +4,7 @@ import com.dwinovo.numen.core.pathing.moves.AimGeometry;
 import java.util.Set;
 
 import com.dwinovo.numen.core.pathing.moves.CalculationContext;
+import com.dwinovo.numen.core.pathing.moves.FlowCost;
 import com.dwinovo.numen.core.pathing.moves.Input;
 import com.dwinovo.numen.core.pathing.moves.Movement;
 import com.dwinovo.numen.core.pathing.moves.MovementHelper;
@@ -50,6 +51,17 @@ public class MovementAscend extends Movement {
      */
     public static double cost(CalculationContext context, int x, int y, int z, int destX, int destZ) {
         BlockState toPlace = context.get(destX, y, destZ);
+        // 落点在<b>下落水柱</b>里:浮力(每 tick 按跳)把人挂在水柱里,所以"爬上去"就是
+        // 逆着水柱往上游 —— 用不到垫脚方块,定价按落差分档(向上贵、向下便宜)。
+        // 水柱底下是岩浆/虚空时照旧不可行(见 fallingWaterTerminatesSafely)。
+        if (MovementHelper.isFallingWater(toPlace.getFluidState())) {
+            if (!NavSettings.get().allowFallingWater
+                    || !MovementHelper.fallingWaterTerminatesSafely(
+                            context.view, context.loadedTest, destX, y, destZ)) {
+                return COST_INF;
+            }
+            return FlowCost.fallingWaterCost(context.waterWalkSpeed, 1, context.waterDepthStrider);
+        }
         double additionalPlacementCost = 0;
         if (!MovementHelper.canWalkOn(context, destX, y, destZ, toPlace)) {
             additionalPlacementCost = context.costOfPlacingAt(destX, y, destZ, toPlace);

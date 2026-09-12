@@ -16,6 +16,7 @@ import com.dwinovo.numen.core.ScaffoldTagTestSupport;
 import com.dwinovo.numen.core.pathing.moves.ActionCosts;
 import com.dwinovo.numen.core.pathing.moves.CalculationContext;
 import com.dwinovo.numen.core.pathing.moves.ChunkLoadedTest;
+import com.dwinovo.numen.core.pathing.moves.FlowCost;
 import com.dwinovo.numen.core.pathing.moves.MovementHelper;
 import com.dwinovo.numen.core.pathing.moves.Moves;
 import com.dwinovo.numen.core.pathing.moves.MutableMoveResult;
@@ -254,24 +255,35 @@ class WaterCrossingCostTest {
 
     // ==================== 深水:游泳位与三步水路 ====================
 
-    /** 游泳位在水面下一格:水面那格站不住,顶层水格下面那格才有支撑。 */
+    /**
+     * 泳道在哪:浮着的水才算泳位 —— 深水(3 格)的泳道是<b>水面那一格</b>与其下一格,
+     * 湖底那一格不算(沉底的人头在水下,是憋气不是游泳)。
+     */
     @Test
-    void swimLaneSitsOneBelowTheWaterSurface() {
+    void swimLaneIsTheFloatingWater() {
         FakeView v = channel(3, false);
         assertTrue(MovementHelper.canWalkThrough(v, at(1, TOP_WATER)), "顶层水格应可穿行");
         assertTrue(MovementHelper.canWalkThrough(v, at(1, SHORE_FEET)), "水面上方应是空气");
-        assertFalse(MovementHelper.canWalkOn(v, at(1, TOP_WATER)),
-                "顶层水格上面是空气 → 不能站(不许水上行走)");
+        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER)),
+                "水面那一格就是泳位(浮着,靠浮力挂住)");
         assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 1)),
-                "顶层水格下面那格上面还有水 → 可站,这就是游泳位");
+                "再下一格也浮着(脚下一格还是水),同样可站");
+        assertFalse(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 2)),
+                "再往下脚下一格就是湖底石了:不浮 → 不是泳道(沉底憋气那段)");
     }
 
-    /** 水下湖底也认(深水横渡时贴着底游也是路)。 */
+    /**
+     * 湖底那一格<b>不</b>是路:脚踩着石头、头在水下 —— 沉底游泳是憋气,
+     * 该由"走进水里的水面那一格"处理,而不是让规划器把人贴着湖底推过去
+     * (那正是"在水里如履平地"的模型来源)。
+     */
     @Test
-    void lakeBedIsWalkableSoDeepWaterHasLanes() {
+    void lakeBedIsNotASwimLane() {
         FakeView v = channel(3, false);
-        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 3)), "湖底 stone 可站");
-        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 2)), "水柱里也可站");
+        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 3)), "湖底 stone 本身可站");
+        assertFalse(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 2)),
+                "贴着湖底那一层水:脚下一格就是湖底石 → 不浮,不算泳道");
+        assertTrue(MovementHelper.canWalkOn(v, at(0, TOP_WATER)), "岸上可站(对照:岸面在 x≤0 / x≥4)");
     }
 
     /** 完整水路三步都在成本上可行:下水 → 横渡 → 上岸。 */
@@ -457,12 +469,11 @@ class WaterCrossingCostTest {
     }
 
     /**
-     * 下落水柱(瀑布)依旧不可穿:它的流体是原版 {@code FALLING}(水量恒 8,LEVEL 8),
-     * 推力竖直向下,而执行侧在液体里从不按 JUMP(没有上浮输入)——放行它就是
-     * "能规划、走不动"。
+     * 下落水柱(瀑布)的流体判据:原版 {@code FALLING}(水量恒 8,LEVEL 8),
+     * 既不是源、也不是横向流水。
      */
     @Test
-    void fallingWaterStaysAWall() {
+    void fallingWaterIsRecognised() {
         BlockState falling = waterLevel(8);
         FluidState fs = falling.getFluidState();
         assertEquals(8, fs.getAmount(), "下落水柱的水量是满的(LEVEL 8 → FALLING)");
@@ -472,9 +483,227 @@ class WaterCrossingCostTest {
                 "对照:LEVEL 3 的水就是横向流水");
         assertFalse(MovementHelper.isHorizontalWaterFlow(Blocks.WATER.defaultBlockState().getFluidState()),
                 "对照:源方块不是流水");
+    }
 
-        FakeView v = slopedRiver();
-        v.set(4, TOP_WATER, 0, falling); // 河道末端掉下一格:瀑布
-        assertFalse(MovementHelper.canWalkThrough(v, at(4, TOP_WATER)), "瀑布那一格身体占不了");
+    // ==================== 现象 1:深水里"如履平地" ====================
+
+    /**
+     * 只建水柱:x ∈ [xMin, xMax],y ∈ [bottomY, topY] 全是水,底下<b>不放湖底</b>
+     * (留给调用方自己压一块,好造"水柱底下是岩浆/虚空")。
+     */
+    private static FakeView waterColumn(int xMin, int xMax, int topY, int bottomY) {
+        FakeView v = new FakeView();
+        for (int x = xMin; x <= xMax; x++) {
+            for (int y = bottomY; y <= topY; y++) {
+                v.set(x, y, 0, Blocks.WATER.defaultBlockState());
+            }
+        }
+        return v;
+    }
+
+    /**
+     * 浮着的泳位判据:脚那格是水、<b>脚下一格也是水</b>才算浮着(原版
+     * {@code !onGround() → h *= 0.5} 的那一档);脚踩得到底就是涉水。
+     */
+    @Test
+    void floatingIsWaterUnderTheFeetToo() {
+        FakeView deep = waterColumn(0, 2, 64, 60);
+        assertTrue(MovementHelper.isFloatingAt(deep, ChunkLoadedTest.ALWAYS, 1, 62, 0),
+                "脚 62 是水、61 也是水 → 浮着");
+        assertFalse(MovementHelper.isFloatingAt(deep, ChunkLoadedTest.ALWAYS, 1, 60, 0),
+                "脚在水柱最底那一格、下一格不是水 → 踩得到底,算涉水");
+        assertFalse(MovementHelper.isFloatingAt(deep, ChunkLoadedTest.ALWAYS, 1, 65, 0),
+                "水面上方不是水 → 根本不涉水");
+
+        FakeView puddle = channel(1, false); // 1 格深:水在 TOP_WATER,湖底压在下面
+        assertFalse(MovementHelper.isFloatingAt(puddle, ChunkLoadedTest.ALWAYS, 1, TOP_WATER, 0),
+                "1 格浅水:脚下一格是湖底 → 涉水(执行侧因此不按跳,不会一路蹦)");
+    }
+
+    /**
+     * <b>现象 1 的模型侧钉子</b>:深水横渡必须按水价收钱,不能被当成陆地。
+     *
+     * <p>曾经的坑有两层:水价档位只取"涉水"那一档(有深海探索者时,浮着的人本该按
+     * 原版 {@code h *= 0.5} 减半),而泳道里 {@code isWater(pb0)} 为真又把疾跑折扣
+     * 关掉 —— 于是"贴着湖底那一层"反而比泳道便宜,规划器把整条深水横渡压在湖底当
+     * 陆地走,看上去就是"在水里如履平地"。现在浮着那一档由
+     * {@link MovementHelper#waterTierCost} 按实际位置选。
+     */
+    @Test
+    void deepWaterTraverseIsPricedAsWaterNotAsLand() {
+        FakeView v = channel(4, false); // 4 格深:TOP_WATER 及其下三格都是水
+        CalculationContext ctx = context(v);
+        int bed = TOP_WATER - 3; // 湖底那一格(脚下一格是石头 → 涉水档,模型里已不是路)
+        int lane = TOP_WATER - 1; // 水柱里浮着的那一格(脚下一格还是水 → 浮着档)
+
+        double bedCost = Moves.TRAVERSE_EAST.cost(ctx, 1, bed, 0);
+        double laneCost = Moves.TRAVERSE_EAST.cost(ctx, 1, TOP_WATER, 0); // 泳道 = 水面那一格
+        assertTrue(bedCost >= ActionCosts.WALK_ONE_IN_WATER_COST - 1e-9,
+                "深水里贴着湖底走一格也该是水价,不能因为身位通透就吃疾跑折扣(实为 " + bedCost + ")");
+        assertTrue(bedCost > ActionCosts.WALK_ONE_BLOCK_COST * 1.5,
+                "深水里走一格必须明显贵于陆地(实为 " + bedCost + " vs " + ActionCosts.WALK_ONE_BLOCK_COST + ")");
+        assertTrue(laneCost < COST_INF && laneCost > ActionCosts.WALK_ONE_BLOCK_COST,
+                "泳道照样可规划,而且按水价(实为 " + laneCost + ")");
+
+        // 对照:浅水(1 格)涉水与深水泳道落在同一条水价曲线上,都不是陆价
+        CalculationContext shallow = context(channel(1, false));
+        double wade = Moves.TRAVERSE_EAST.cost(shallow, 1, TOP_WATER, 0); // 浅水涉水
+        assertTrue(wade >= ctx.waterWalkSpeed - 1e-9, "浅水涉水也是水价(实为 " + wade + ")");
+    }
+
+    /**
+     * 有深海探索者时,浮着那一档比涉水档更靠近陆价(原版离地时附魔减半),而且两档
+     * 都由 {@link MovementHelper#waterTierCost} 按<b>实际位置</b>选,不是一个搜索
+     * 里一把尺量到底。
+     */
+    @Test
+    void floatingTierFollowsDepthStrider() {
+        FakeView v = channel(4, false);
+        CalculationContext ctx = context(v);
+        int bed = TOP_WATER - 3;
+        int lane = TOP_WATER - 1;
+        double wadingTier = CalculationContext.WaterCost.cost(ctx.waterDepthStrider,
+                CalculationContext.WaterCost.WADING_DEPTH);
+        double floatingTier = CalculationContext.WaterCost.cost(ctx.waterDepthStrider,
+                CalculationContext.WaterCost.FLOATING_DEPTH);
+        assertEquals(wadingTier, MovementHelper.waterTierCost(ctx, wadingTier, 1, bed, 0), 1e-9,
+                "踩得到底 → 涉水档");
+        assertEquals(floatingTier, MovementHelper.waterTierCost(ctx, wadingTier, 1, lane, 0), 1e-9,
+                "浮着 → 浮着档(0 级附魔两档同价,3 级时浮着只剩一半附魔)");
+        // 这一档在附魔身上才看得见:3 级踩底 = 陆价(4.633),3 级浮着只剩一半附魔(6.86)。
+        // 深水泳道一直按涉水档收钱,就等于把有附魔的人按"踩底"计价。
+        assertEquals(ActionCosts.WALK_ONE_BLOCK_COST,
+                CalculationContext.WaterCost.cost(3, CalculationContext.WaterCost.WADING_DEPTH), 1e-9);
+        assertEquals(6.862,
+                CalculationContext.WaterCost.cost(3, CalculationContext.WaterCost.FLOATING_DEPTH), 1e-3);
+    }
+
+    /**
+     * 水里按住跳会把身体<b>往上</b>顶:这条是"不沉"的执行侧来源,也是"逆着水柱游得
+     * 上去"的前提。判据是浮着(脚与脚下都是水),浅水涉水不算 —— 否则浅水里会一路蹦。
+     */
+    @Test
+    void floatingBodyGetsTheBuoyancyStroke() {
+        CalculationContext deep = context(waterColumn(0, 2, 64, 60));
+        assertTrue(MovementHelper.isFloatingAt(deep, 1, 62, 0), "深水泳道:浮着 → 每 tick 按跳");
+        CalculationContext shallow = context(channel(1, false));
+        assertFalse(MovementHelper.isFloatingAt(shallow, 1, TOP_WATER, 0),
+                "浅水涉水:不按跳(踩得到底,按了会变成一路蹦)");
+    }
+
+    // ==================== 现象 2:瀑布(下落水柱)=====================
+
+    /** 一条瀑布:x ∈ [xMin,xMax],y ∈ [bottomY,topY] 是 FALLING 水柱。 */
+    private static FakeView waterfall(int xMin, int xMax, int topY, int bottomY) {
+        FakeView v = new FakeView();
+        BlockState falling = waterLevel(8);
+        for (int x = xMin; x <= xMax; x++) {
+            for (int y = bottomY; y <= topY; y++) {
+                v.set(x, y, 0, falling);
+            }
+        }
+        return v;
+    }
+
+    /**
+     * 落进水池的瀑布:x=1..3 的水柱 62..64,底下 y=61 是一格水池、y=60 是石底。
+     * 水潭必须有底 —— "水悬空"在 {@code waterBaseIsSafe} 里算危险(掉下去没着落)。
+     */
+    private static FakeView waterfallIntoPool() {
+        FakeView v = waterfall(1, 3, 64, 62);
+        for (int x = 1; x <= 3; x++) {
+            v.set(x, 61, 0, Blocks.WATER.defaultBlockState());
+            v.set(x, 60, 0, Blocks.STONE.defaultBlockState());
+        }
+        return v;
+    }
+
+    /**
+     * <b>瀑布从墙改成了价</b>:水柱每一格身体都占得住(浮力挂得住),底下落进水池时
+     * 向上、横渡、向下三档都有价,而且 <b>向下 &lt; 横渡 &lt; 向上</b>。
+     */
+    @Test
+    void waterfallIsCrossableAndPricedByDrop() {
+        FakeView v = waterfallIntoPool();
+        CalculationContext ctx = context(v);
+        assertTrue(MovementHelper.canWalkThrough(v, at(2, 63)), "水柱中段身体占得住");
+        assertTrue(MovementHelper.canWalkOn(v, at(2, 63)), "水柱里可站(浮力挂着)");
+        assertTrue(MovementHelper.canWalkOn(v, at(2, 64)), "再上一格同样可站");
+        assertTrue(MovementHelper.canWalkThrough(v, at(2, 62)), "水柱底部(水池那一格)身体占得住");
+        assertTrue(MovementHelper.fallingWaterTerminatesSafely(v, ChunkLoadedTest.ALWAYS, 2, 63, 0),
+                "底下是水池 → 安全");
+
+        double up = MovementAscend.cost(ctx, 1, 62, 0, 2, 0);    // 逆着水柱往上爬一格(y 62→63)
+        double across = Moves.TRAVERSE_EAST.cost(ctx, 2, 63, 0);  // 水柱里横渡(同层)
+        assertTrue(up < COST_INF && across < COST_INF, "两档都该能规划:up=" + up + " across=" + across);
+        assertTrue(across < up, "逆着水柱往上该贵于横渡:" + across + " vs " + up);
+        assertTrue(FlowCost.fallingWaterCost(ctx.waterWalkSpeed, -1, ctx.waterDepthStrider) < across,
+                "顺着水柱往下该便宜于横渡(纯模型那一档;落一格在动作层还要算下落本身)");
+        assertEquals(FlowCost.fallingWaterCost(ctx.waterWalkSpeed, 1, ctx.waterDepthStrider), up, 1e-9,
+                "向上就是水柱那一档(水价 + 上浮那几 tick)");
+    }
+
+    /** 爬上去那一步(上升原语)也按水柱价:能规划,不会因为落点不可站而去垫方块。 */
+    @Test
+    void ascendingIntoAFallsIsPricedAsFallingWater() {
+        FakeView v = waterfallIntoPool();
+        CalculationContext ctx = context(v);
+        double climb = MovementAscend.cost(ctx, 1, 62, 0, 2, 0);
+        assertTrue(climb < COST_INF, "逆着水柱往上爬一格应可规划,实为 " + climb);
+        assertEquals(FlowCost.fallingWaterCost(ctx.waterWalkSpeed, 1, ctx.waterDepthStrider), climb, 1e-9);
+    }
+
+    /**
+     * <b>危险面守住</b>:水柱底下是岩浆时这一格不许规划进去(横渡/上爬都不行);
+     * 底下什么都没有(一路通到世界底)同样不许。
+     */
+    @Test
+    void waterfallOverDangerIsRefused() {
+        FakeView lava = waterfall(1, 3, 64, 62);
+        lava.set(1, 61, 0, Blocks.LAVA.defaultBlockState()); // 水柱底下是岩浆
+        CalculationContext lavaCtx = context(lava);
+        assertFalse(MovementHelper.fallingWaterTerminatesSafely(lava, ChunkLoadedTest.ALWAYS, 2, 63, 0),
+                "水柱底下是岩浆(63→62→61 岩浆)");
+        assertFalse(MovementHelper.canWalkOn(lava, at(2, 63)), "水柱那一格(63)不许当泳位");
+        assertFalse(MovementHelper.canWalkOn(lava, at(2, 62)), "水柱那一格(62)同样不许");
+        assertFalse(MovementHelper.canWalkThrough(lava, at(2, 63)), "身体也占不了这条水柱");
+        assertFalse(MovementHelper.canWalkThrough(lava, at(2, 64)), "上面那格同理");
+        assertTrue(Moves.TRAVERSE_EAST.cost(lavaCtx, 2, 63, 0) >= COST_INF, "不许横渡岩浆上的水柱");
+        assertTrue(MovementAscend.cost(lavaCtx, 1, 62, 0, 2, 0) >= COST_INF, "也不许往上爬进去");
+
+        FakeView voidFalls = waterfallIntoPool();
+        for (int x = 1; x <= 3; x++) {
+            voidFalls.set(x, 60, 0, Blocks.AIR.defaultBlockState()); // 把水潭的底抽掉
+        }
+        assertFalse(MovementHelper.fallingWaterTerminatesSafely(voidFalls, ChunkLoadedTest.ALWAYS, 2, 63, 0),
+                "水潭悬空、一路通到世界底:当危险处理");
+        assertFalse(MovementHelper.canWalkThrough(voidFalls, at(2, 63)), "半空的瀑布不许规划进去");
+    }
+
+    /** 水柱落在实心地面上照样安全:游到底就是站在那上面。 */
+    @Test
+    void waterfallOverSolidGroundIsSafe() {
+        FakeView v = waterfall(1, 3, 64, 62);
+        for (int x = 1; x <= 3; x++) {
+            v.set(x, 61, 0, Blocks.STONE.defaultBlockState());
+        }
+        assertTrue(MovementHelper.fallingWaterTerminatesSafely(v, ChunkLoadedTest.ALWAYS, 2, 63, 0),
+                "水柱底下是石头:人游到底站在石头上");
+        assertTrue(MovementHelper.canWalkOn(v, at(2, 63)), "水柱里照样是泳道");
+    }
+
+    /** 关掉 {@link NavSettings#allowFallingWater} 即退回上一轮的语义:水柱重新是墙。 */
+    @Test
+    void fallingWaterKillSwitchPutsTheWallBack() {
+        boolean saved = NavSettings.get().allowFallingWater;
+        try {
+            NavSettings.get().allowFallingWater = false;
+            FakeView v = waterfallIntoPool();
+            CalculationContext ctx = context(v);
+            assertFalse(MovementHelper.canWalkThrough(v, at(2, 63)), "关掉后占不了水柱那一格");
+            assertTrue(Moves.TRAVERSE_EAST.cost(ctx, 2, 63, 0) >= COST_INF, "关掉后水柱不可横渡");
+        } finally {
+            NavSettings.get().allowFallingWater = saved;
+        }
     }
 }

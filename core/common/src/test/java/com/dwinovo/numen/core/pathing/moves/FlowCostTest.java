@@ -176,4 +176,94 @@ class FlowCostTest {
         assertTrue(FlowCost.cost(WALK_ONE_BLOCK_COST, 1, 0, FX, FZ, 1, 3) < WALK_ONE_BLOCK_COST,
                 "3 级附魔顺流比陆价还快 —— 原版就是这样(游泳速度 4.4 格/s 再加 0.6 的水流)");
     }
+
+    // ==================== 下落水柱(瀑布) ====================
+
+    /**
+     * 水柱的三档:<b>顺水柱往下 &lt; 水柱里横渡 &lt; 逆着水柱往上</b>,三档都有限、都为正。
+     *
+     * <p>这就是"瀑布从墙改成价"的算术:往上贵,是因为原版按住跳的上浮稳态只有
+     * 0.16 格/tick(一格 6.25 tick);往下便宜,是因为水柱的推力与阻尼都在推着人掉,
+     * 顺流下坠比横着游快。但哪一档都不是墙。
+     */
+    @Test
+    void waterfallTiersAreOrdered() {
+        double up = FlowCost.fallingWaterCost(BASE, 1, 0);
+        double across = FlowCost.fallingWaterCost(BASE, 0, 0);
+        double down = FlowCost.fallingWaterCost(BASE, -1, 0);
+        assertTrue(down < across, "顺水柱往下该便宜于横渡:" + down + " vs " + across);
+        assertTrue(across < up, "逆着水柱往上该贵于横渡:" + across + " vs " + up);
+        assertTrue(down > 0, "下坠也不是免费");
+        assertTrue(up < COST_INF, "逆着水柱仍然有限 —— 它是价,不是墙");
+        assertTrue(up > 0, "上浮也不是倒扣");
+    }
+
+    /** 横渡水柱 = 水价乘上那一点点"水往下按"的拖累,不另加竖直项。 */
+    @Test
+    void crossingAFallsCostsTheBasePlusDrag() {
+        assertEquals(0, FlowCost.fallingWaterVerticalAdjust(0, 0), EPS, "不升不降就没有竖直项");
+        assertEquals(BASE * FlowCost.FALLING_WATER_DRAG, FlowCost.fallingWaterCost(BASE, 0, 0), EPS);
+        assertTrue(FlowCost.FALLING_WATER_DRAG > 1 && FlowCost.FALLING_WATER_DRAG < 1.1,
+                "拖累该是小量:水柱的推力只有 0.138 * 0.014 格/tick");
+    }
+
+    /** 竖直项按"原版按住跳的上浮稳态 0.2 格/tick"算:升一格 5 tick 的水柱价份额,降一格省 65%。 */
+    @Test
+    void verticalAdjustFollowsVanillaSwimSpeed() {
+        assertEquals(0.2, FlowCost.VERTICAL_SWIM_SPEED, 1e-9, "0.04 的划水 / 0.2 的水中阻尼");
+        assertEquals(5.0, FlowCost.VERTICAL_SWIM_TICKS_PER_BLOCK, 1e-9);
+        assertEquals(5.0, FlowCost.fallingWaterVerticalAdjust(1, 0), EPS,
+                "0 级附魔:一格就是原版那 5 tick(0.2 格/tick)");
+        assertEquals(-5.0 * FlowCost.FALLING_WATER_DOWN_BONUS,
+                FlowCost.fallingWaterVerticalAdjust(-1, 0), EPS, "往下省一部分(负值=便宜)");
+        assertTrue(FlowCost.fallingWaterVerticalAdjust(2, 0)
+                > FlowCost.fallingWaterVerticalAdjust(1, 0), "多升一格更贵");
+        assertTrue(FlowCost.fallingWaterVerticalAdjust(1, 0) > 0, "向上永远是正的加价");
+        assertTrue(FlowCost.fallingWaterVerticalAdjust(-1, 0) < 0, "向下永远是负的(便宜)");
+    }
+
+    /**
+     * 附魔对水柱竖直项的影响是<b>小量</b>:游泳加速度本来就比水柱推力大两个数量级,
+     * 所以 0→3 级只把"升一格"的加价削掉一成多 —— 水价那两档才是主体。
+     * (真正把附魔拉开的还是 {@link CalculationContext.WaterCost} 那条水价曲线。)
+     */
+    @Test
+    void enchantBarelyTouchesTheFallsUpCharge() {
+        for (double level = 0; level <= 3; level++) {
+            double up = FlowCost.fallingWaterCost(BASE, 1, level);
+            assertTrue(up > BASE, level + " 级:逆着水柱往上终究比横渡贵,实为 " + up);
+            assertTrue(up < BASE * 3, level + " 级:逆着水柱也不该贵到离谱,实为 " + up);
+        }
+        double noEnchant = FlowCost.fallingWaterVerticalAdjust(1, 0);
+        double fullEnchant = FlowCost.fallingWaterVerticalAdjust(1, 3);
+        assertTrue(fullEnchant < noEnchant,
+                "附魔该让上浮便宜一点点:0 级 " + noEnchant + " vs 3 级 " + fullEnchant);
+        assertEquals(noEnchant * 0.7, fullEnchant, 1e-9, "3 级附魔:竖直时间省三成");
+        assertTrue(noEnchant - fullEnchant < 2.0,
+                "但只是小量(≈" + (noEnchant - fullEnchant) + " tick)");
+        assertTrue(FlowCost.fallingWaterCost(BASE, -1, 0) < BASE, "顺水柱往下仍然便宜于横渡");
+        assertEquals(FlowCost.fallingWaterCost(BASE, 1, 9), FlowCost.fallingWaterCost(BASE, 1, 3), EPS,
+                "等级截断同原版(超 3 按 3)");
+        assertEquals(FlowCost.fallingWaterCost(BASE, 1, -2), FlowCost.fallingWaterCost(BASE, 1, 0), EPS,
+                "负数按 0");
+    }
+
+    /** 下界:再深的水柱往下也不能把成本算成负数/免费。 */
+    @Test
+    void longDropStaysPositive() {
+        for (double drop = -1; drop >= -64; drop--) {
+            double cost = FlowCost.fallingWaterCost(BASE, drop, 0);
+            assertTrue(cost >= BASE * FlowCost.MIN_NET_FACTOR, "落差 " + drop + " 的成本该有下界,实为 " + cost);
+        }
+    }
+
+    /** 与既有水价曲线接得上:0 级水价那一档往上 1 格 ≈ 15.5 tick(9.27 + 6.25)。 */
+    @Test
+    void composesWithTheWaterPriceCurveForFalls() {
+        double base = CalculationContext.WaterCost.cost(0, CalculationContext.WaterCost.WADING_DEPTH);
+        assertEquals(base * FlowCost.FALLING_WATER_DRAG + FlowCost.fallingWaterVerticalAdjust(1, 0),
+                FlowCost.fallingWaterCost(base, 1, 0), 1e-9);
+        assertTrue(FlowCost.fallingWaterCost(base, 1, 0) < base * 2,
+                "逆着水柱上一格该是「贵一点」,不是「贵一倍以上」");
+    }
 }

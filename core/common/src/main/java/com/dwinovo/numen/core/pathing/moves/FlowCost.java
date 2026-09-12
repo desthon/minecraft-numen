@@ -34,6 +34,11 @@ package com.dwinovo.numen.core.pathing.moves;
  * ({@code 1 - share(0) = 0.30} 倍游泳速度),所以流水永远不是墙,只是贵 ——
  * 这就是"能规划、也真走得到"的算术来源(0 级逆流 ≈ 0.66 格/s,
  * 一格 30 tick,远在 {@code NavSettings.movementTimeoutTicks} 之内)。
+ *
+ * <p><b>下落水柱(瀑布)</b>另有一档 {@link #fallingWaterCost}:推力竖直朝下,于是
+ * "顺水柱往下"便宜、"逆着水柱往上"贵(原版按住跳的上浮稳态 0.2 格/tick,一格 5 tick)。
+ * 它能被规划的前提是执行侧真的按着跳 —— 见
+ * {@link MovementHelper#isFloatingAt}(浮着就每 tick 按,浅水涉水不按)。
  */
 public final class FlowCost {
 
@@ -115,5 +120,92 @@ public final class FlowCost {
     public static double cost(double baseWaterCost, double moveX, double moveZ,
                               double flowX, double flowZ, double depthStrider) {
         return cost(baseWaterCost, moveX, moveZ, flowX, flowZ, 1, depthStrider);
+    }
+
+    // ==================== 下落水柱(瀑布) ====================
+
+    /**
+     * 原版 FALLING 流体推力每 tick 的<b>竖直</b>分量(格/tick),即它的
+     * {@code getFlow(...).y} 乘 {@code WATER_FLOW_SCALE}。
+     *
+     * <p>推导(反汇编 Gradle 缓存里 mapped jar 的 {@code FlowingFluid.getFlow}):末尾
+     * "FALLING 且旁边有实心面"那一段先把矢量<b>归一化</b>再 {@code add(0,-6,0)},
+     * 结果就是 {@code (0,-1,0)};可 FALLING 的源方块在 1.20.1 里四角通常还有流体,
+     * {@code calculateAverageOfNeighborHeight} 会把水平那一支补回来一点 —— 所以推力
+     * <b>不是零,只是恒朝下</b>,量级 0.138 * 0.014。这里取的是量级,不是逐格精确值:
+     * 这个模型的精度是"格级"。
+     */
+    public static final double FALLING_WATER_PUSH = 0.138 * VANILLA_FLOW_PUSH;
+
+    /** 挂在水柱里按住跳的竖直稳态速度(格/tick):原版每 tick +0.04 的划水 / 水中阻尼 0.2。 */
+    public static final double VERTICAL_SWIM_SPEED = 0.04 / 0.2;
+
+    /** 水柱里横向前进吃到的拖累倍率(见 {@link #fallingWaterCost})。 */
+    public static final double FALLING_WATER_DRAG = 1.02;
+
+    /** 竖直上浮 1 格要多少 tick(原版事实:0.2 格/tick → 5)。 */
+    public static final double VERTICAL_SWIM_TICKS_PER_BLOCK = 1 / VERTICAL_SWIM_SPEED;
+
+    /** 顺着水柱往下比横着游快多少(原版水中阻尼被下落吃到 0.2)。 */
+    public static final double FALLING_WATER_DOWN_BONUS = 0.65;
+
+    /**
+     * 穿越水柱时竖直那一段的成本修正(可为负 —— 顺水柱往下比横渡便宜)。
+     *
+     * <p>{@code baseWaterCost} 说的是"水平走一格要
+     * {@link CalculationContext#waterWalkSpeed} tick",水柱里真正变了的是竖直位移,
+     * 所以这里只算竖直差:
+     * <ul>
+     *   <li>净升 {@code +1}:多花 {@link #VERTICAL_SWIM_TICKS_PER_BLOCK}(原版按住跳的
+     *       上浮稳态是 0.2 格/tick,一格 5 tick;附魔与水流的推力会分摊掉一部分);</li>
+     *   <li>净降 {@code -1}:省掉一部分({@link #FALLING_WATER_DOWN_BONUS}),顺水柱
+     *       往下确实比横着游快;</li>
+     *   <li>不升降:0。</li>
+     * </ul>
+     *
+     * <p>纯函数:只吃数字,不碰世界、玩家与设置(与 {@link #cost} 同源)。
+     */
+    public static double fallingWaterVerticalAdjust(double dy, double depthStrider) {
+        if (dy == 0) {
+            return 0; // 纯横渡:不吃竖直项
+        }
+        // 时间是"按照游泳速度算出来的",而游泳速度随深海探索者提高(WaterCost 里的那条曲线),
+        // 所以竖直项用 {@link #swimSpeedFactor} 缩一次 —— 附魔越高,水柱里上浮越快。
+        // 注意:<b>不能</b>像横向流水那样再乘 (1 + 水流占比):那会让"上浮要多久"变得比
+        // 无水流时还长(方向是反的)。
+        double unit = VERTICAL_SWIM_TICKS_PER_BLOCK * swimSpeedFactor(depthStrider);
+        return dy > 0 ? dy * unit                                   // 向上:多花
+                : dy * unit * FALLING_WATER_DOWN_BONUS;             // 向下:省掉一部分(负值)
+    }
+
+    /**
+     * 游泳速度因子 {@code 1..0.7}:0 级附魔按原版的 {@code 0.2} 格/tick;3 级附魔把水速
+     * 顶到 {@code getSpeed()} 那一档,竖直时间省掉三成。取三成而不是"按水速曲线等比缩",
+     * 是因为竖直分量本来就只占整格代价的一小部分(5 tick 对 9.09 的横向帧),按水速曲线
+     * 会缩得过狠,把这个修正抹平。
+     */
+    private static double swimSpeedFactor(double depthStrider) {
+        double h = clampDepthStrider(depthStrider) / MAX_DEPTH_STRIDER; // 0..1
+        return 1 - 0.3 * h;
+    }
+
+    /**
+     * 穿越一格下落水柱的代价。
+     *
+     * <p>基础 = {@code 水价 * }{@link #FALLING_WATER_DRAG}(水流把你往下按,横向前进被
+     * 抵消一点点),再叠加 {@link #fallingWaterVerticalAdjust} 的竖直差。于是
+     * <b>顺着瀑布往下便宜(甚至比横渡快),逆着水柱往上贵但仍有限</b> —— 与
+     * {@link #cost} 同一条道理:水柱也是价,不是墙(前提是执行侧按着跳,见
+     * {@link MovementHelper#isFloatingAt})。
+     *
+     * @param baseWaterCost 该档"没有水流"的水价({@link CalculationContext#waterWalkSpeed})
+     * @param dy            这次移动的净竖直位移(格;向上为正)
+     * @param depthStrider  深海探索者等级(0..3)
+     * @return 每格成本(tick);恒为正、恒有限
+     */
+    public static double fallingWaterCost(double baseWaterCost, double dy, double depthStrider) {
+        double cost = baseWaterCost * FALLING_WATER_DRAG
+                + fallingWaterVerticalAdjust(dy, depthStrider);
+        return Math.max(baseWaterCost * MIN_NET_FACTOR, cost);
     }
 }

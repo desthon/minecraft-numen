@@ -182,16 +182,27 @@ public final class MovementHelper {
         if (!fluidState.isEmpty()) {
             // 横向流水(非满格水)走的是"泳位"语义:能不能穿只由"头出不出水"决定,
             // 水流快慢是"价"的问题,不是墙的问题(见 waterMoveCost)。
-            // 其余"可能在流动"的情形(满格源挨着流水、下落水柱)维持旧判:不可穿。
-            if (!isHorizontalWaterFlow(fluidState) && isFlowing(view, x, y, z, state)) {
+            // 其余"可能在流动"的情形(满格源挨着流水)维持旧判:不可穿。
+            boolean horizontalFlow = isHorizontalWaterFlow(fluidState);
+            if (!horizontalFlow && !isFallingWater(fluidState) && isFlowing(view, x, y, z, state)) {
                 return false; // 水流会把人冲离路径
             }
             if (NavSettings.get().assumeWalkOnWater) {
                 return false; // 水面行走语义下水柱不可穿
             }
             BlockState up = view.getBlockState(new BlockPos(x, y + 1, z));
-            if (!up.getFluidState().isEmpty() || up.getBlock() instanceof WaterlilyBlock) {
-                return false; // 上方还有流体/睡莲,穿过去等于潜水
+            boolean headClear = up.getFluidState().isEmpty() && !(up.getBlock() instanceof WaterlilyBlock);
+            if (isFallingWater(fluidState)) {
+                // 下落水柱:不管头出不出水,都先过"底下有没有着落"这一关 ——
+                // 底下是岩浆/虚空的水柱不许把身体放进去(被按下去就是没了)。
+                // 水柱本身是泳道(每 tick 按跳的浮力挂得住),不是墙。
+                return NavSettings.get().allowFallingWater
+                        && fallingWaterTerminatesSafely(view, loaded, x, y, z);
+            }
+            if (!headClear) {
+                // 头还泡在水里:横向流水是"浮着的泳道",全身泡在水里也谈得上潜水;
+                // 满格源挨着流水等模糊情形维持旧判(不可穿)。
+                return NavSettings.get().allowFlowingWater && horizontalFlow;
             }
             return fluidState.getType() instanceof WaterFluid; // 只有水柱可游走
         }
@@ -320,9 +331,13 @@ public final class MovementHelper {
     }
 
     /**
-     * MAYBE 的位置精判(水/岩浆)。水的"游泳位"语义:默认只能站在
-     * 上方还有水的水格里(浮在水柱中);开水面行走则只能站在上方
-     * 无水的水面上——两者按 XOR 互斥。
+     * MAYBE 的位置精判(水/岩浆)。水的"泳位"语义:默认只能站在上方还有水的水格里
+     * (浮在水中);开水面行走则只能站在上方无水的水面上——两者按 XOR 互斥。
+     *
+     * <p><b>本轮把泳道说清楚了</b>(现象 1 的模型侧):泳道 = <b>浮着的水</b>
+     * ({@link #isFloatingAt}:脚与脚下都是水),不是"头顶有水的水柱内里"。
+     * 区别就在湖底那一格 —— 沉底的人头在水下,fake player 会一路憋气,不该当路;
+     * 而浮着的那几层(含水面那一格)靠浮力挂得住,才是真泳位。
      */
     public static boolean canWalkOnPosition(BlockGetter view, ChunkLoadedTest loaded,
                                             int x, int y, int z, BlockState state) {
@@ -332,11 +347,21 @@ public final class MovementHelper {
             if (up == Blocks.LILY_PAD || up instanceof CarpetBlock) {
                 return true;
             }
-            if (isFlowing(view, x, y, z, state) || upState.getFluidState().getType() == Fluids.FLOWING_WATER) {
-                // 流水上唯一能站的情形:压在静水下面且未开水面行走
-                return isWater(upState) && !NavSettings.get().assumeWalkOnWater;
+            if (isFallingWater(state.getFluidState())) {
+                // 下落水柱里的"泳位":浮力(每 tick 按跳)把人挂在水柱里,所以自上而下
+                // 每一格都站得住;但只在水柱<b>底下有着落</b>时才算(见
+                // fallingWaterTerminatesSafely)——不能浮在半空的瀑布里,更不能挂在
+                // 一条直通岩浆的水柱上(那是被按进岩浆的捷径,正是要守住的危险面)。
+                return NavSettings.get().allowFallingWater && !NavSettings.get().assumeWalkOnWater
+                        && isFloating(view, loaded, x, y, z) && isSignedOffBelow(view, loaded, x, y, z);
             }
-            return isWater(upState) ^ NavSettings.get().assumeWalkOnWater;
+            if (NavSettings.get().assumeWalkOnWater) {
+                // 开水面行走语义:只能站在"上方无水"的水面上,与泳位语义按 XOR 互斥
+                return !isWater(upState);
+            }
+            // 泳道判据(见方法注):浮着的水,或"头顶是水柱/瀑布"的那一格。
+            // 湖底那一格因此被排除(它脚下是实心石头):沉底的人头在水下,不该当路。
+            return isSwimLane(view, loaded, x, y, z);
         }
 
         if (isLava(state) && !isFlowing(view, x, y, z, state) && NavSettings.get().assumeWalkOnLava) {
@@ -759,6 +784,9 @@ public final class MovementHelper {
     /** 水流下游探几格(原版推力是连续矢量,规划里按格近似成"往那边 1~2 格")。 */
     private static final int PUSHED_CELLS = 2;
 
+    /** 看一片水底下有没有底:最多往下看几格(grotto/峡谷底通常近在眼前,太深就别赌)。 */
+    private static final int WATER_BASE_LOOKDOWN = 8;
+
     /** 原版按水高缩推力的门槛:{@code maxHeight < 0.4} 才缩,之上是全额推力。 */
     private static final double MIN_PUSH_HEIGHT = 0.4;
 
@@ -782,14 +810,151 @@ public final class MovementHelper {
 
     /**
      * 下落的水:原版 {@code FlowingFluid.FALLING} 的流体状态(瀑布的水柱)。
-     * 它的 {@code getFlow} 是 {@code (0, -1, 0)}(见 FlowingFluid.getFlow 末尾那段
-     * "FALLING 且旁边有实心面 → 归一化后加 (0,-6,0)"),推力把人往<b>下</b>按;
-     * 而在水里上浮要靠按 JUMP(原版 {@code LivingEntity.aiStep} →
-     * {@code jumpInLiquid} 加 0.04),执行侧的动作里没有这个输入,所以下落水柱维持"不可穿"。
+     * 它的 {@code getFlow} 竖直分量恒朝下(见 {@code FlowingFluid.getFlow} 末尾那段
+     * "FALLING 且旁边有实心面 → 归一化后加 (0,-6,0)"),推力把人往<b>下</b>按。
+     *
+     * <p><b>曾经的墙、现在的价</b>:上一轮它被判成不可穿,理由是"执行侧在液体里不按
+     * JUMP(没有上浮输入),放行就是能规划走不动"。本轮把执行侧那半个前提补上了
+     * ({@link Movement#update()} 浮着就按跳),水柱因此可穿 —— 定价见
+     * {@link FlowCost#fallingWaterCost}(向上贵、向下便宜),底线见
+     * {@link #fallingWaterTerminatesSafely}(底下是岩浆/虚空就不许进)。
      */
     public static boolean isFallingWater(FluidState fluidState) {
         return fluidState.getType() instanceof FlowingFluid
                 && fluidState.getValue(FlowingFluid.FALLING);
+    }
+
+    /**
+     * (x,y,z) 这格水<b>能不能把人浮住</b>:那一格是水,而且水是可游的
+     * (横向流水 / 下落水柱 / 静水都算,满格源挨着流水的模糊情形不算 ——
+     * 与 {@link #canWalkThroughPosition} 同一把尺)。
+     *
+     * <p>为什么需要这一档:原版 {@code LivingEntity.travel} 的水分支里
+     * {@code if (!onGround()) h *= 0.5} —— 离地(浮着)时深海探索者只算一半;
+     * 而 {@link CalculationContext.WaterCost} 的 {@code waterDepth} 入参就是为它留的
+     * (踏底涉水 vs 浮在水柱里)。同时它也是执行侧的浮力闸门:
+     * {@link Movement#update()} 只对浮着的身体持续按跳(原版 {@code jumpInLiquid}
+     * 每 tick +0.04),把身体稳在水面附近 —— <b>浅水涉水不按跳</b>,否则会变成一路蹦。
+     */
+    public static boolean isFloatableLiquid(CalculationContext context, int x, int y, int z) {
+        return isFloatableLiquid(context.view, context.loadedTest, x, y, z);
+    }
+
+    public static boolean isFloatableLiquid(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        BlockState state = view.getBlockState(new BlockPos(x, y, z));
+        if (!isWater(state)) {
+            return false;
+        }
+        if (isFallingWater(state.getFluidState())) {
+            // 下落水柱:推力朝下,按住跳的人照样挂得住(每 tick +0.04 的上浮)。
+            // "底下有没有着落"不在这一层判 —— 那是泳位的事(见 isSwimLane)。
+            return NavSettings.get().allowFallingWater;
+        }
+        if (isHorizontalWaterFlow(state.getFluidState())) {
+            return NavSettings.get().allowFlowingWater;
+        }
+        // 静水(含瀑布砸下来的那一片池塘):水就是水,浮得住。
+        // 剩下的是"满格源挨着流水"这类说不清的情形,维持旧判(可穿)。
+        return !isFlowing(view, x, y, z, state) || !isHorizontalWaterFlow(state.getFluidState());
+    }
+
+    /**
+     * 脚在 (x,y,z) 这格的<b>身体是不是浮着的</b>:脚那格是水,而且<b>脚下一格也是水</b>
+     * —— 踩不到底,只能靠浮力。
+     *
+     * <p>这一条是三个地方的分界线:
+     * <ul>
+     *   <li>水价档位:{@link #waterTierCost} 浮着按 {@code FLOATING_DEPTH}(原版离地时
+     *       附魔减半),否则按涉水档;</li>
+     *   <li>执行侧的浮力:{@link Movement#update()} 只对浮着的身体持续按跳(原版
+     *       {@code jumpInLiquid} 每 tick +0.04)—— <b>浅水涉水不按跳</b>,否则会变成一路蹦;</li>
+     *   <li>泳位:{@link #canWalkOnPosition} 据此放行整条泳道(水面那一格 + 浮着的水柱)。</li>
+     * </ul>
+     *
+     * <p>脚下一格是水的判据用的是 {@link #isFloatableLiquid}(不要求"头出得水"):
+     * 水柱中段那几格照样是浮着的 —— 只是模型里不拿它们当落脚点罢了。
+     */
+    public static boolean isFloatingAt(CalculationContext context, int x, int y, int z) {
+        return isFloating(context.view, context.loadedTest, x, y, z);
+    }
+
+    public static boolean isFloatingAt(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        return isFloating(view, loaded, x, y, z);
+    }
+
+    private static boolean isFloating(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        return isFloatableLiquid(view, loaded, x, y, z)
+                && isFloatableLiquid(view, loaded, x, y - 1, z); // 脚下一格也是水 → 踩不到底
+    }
+
+    /**
+     * (x,y,z) 能不能当<b>泳位/落脚点</b>。
+     *
+     * <p>两条路:
+     * <ul>
+     *   <li><b>静水/横向流水</b>:要"浮着"——脚那格与脚下一格都是水。湖底那一格因此
+     *       被排除(脚踩着实心、头在水下是憋气,不该当路),而水面上方与水中每一格
+     *       浮着的水都算 —— 蓄满水的池子从上到下都是泳道,不存在"可穿不可站"的死角;</li>
+     *   <li><b>下落水柱</b>:浮力(每 tick 按跳)挂在柱子里,所以自上而下每一格都算,
+     *       只要这条水柱底下有着落(不是岩浆、不是虚空)—— 就是
+     *       {@link #fallingWaterTerminatesSafely}。</li>
+     * </ul>
+     */
+    private static boolean isSwimLane(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        return isFloating(view, loaded, x, y, z)
+                || isFallingWater(view.getBlockState(new BlockPos(x, y, z)).getFluidState())
+                        && isSignedOffBelow(view, loaded, x, y, z);
+    }
+
+    /** 这一格水柱下面有没有着落(水池/地面):只判"掉下去会不会没命",不管是不是泳位。 */
+    private static boolean isSignedOffBelow(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        return NavSettings.get().allowFallingWater && waterBaseIsSafe(view, loaded, x, y - 1, z);
+    }
+
+
+
+    /**
+     * 下落水柱 (x,y,z) 的下方有没有着落:沿水柱往下扫,直到
+     * <ul>
+     *   <li>水柱底下的那格<b>要命</b>(岩浆 / 火 / 岩浆块 / 仙人掌 / 甜浆果 / 末地门)
+     *       → <b>不行</b>。这就是"水柱底部是岩浆/峡谷/虚空时不许规划进去"那一条;</li>
+     *   <li>水柱底下是能站住的地面 → 行(游到底就是岸);</li>
+     *   <li>水柱底下是<b>另一格水</b> → 行,那个人能浮在水面上;那一格再往下的账由
+     *       它自己那趟水去算,不在这里往下递归(避免瀑布打在海洋上时一路扫到海底);</li>
+     * </ul>
+     * 一路到世界底还是水/空气 → <b>不行</b>(峡谷或虚空:人一路掉到底)。
+     *
+     * <p><b>看不清的下游(未加载)一律算不安全</b> —— 宁可绕路,不赌一次(与
+     * {@link #flowCarriesIntoDanger} 同一条规矩)。
+     */
+    public static boolean fallingWaterTerminatesSafely(BlockGetter view, ChunkLoadedTest loaded,
+                                                       int x, int y, int z) {
+        int bottom = view.getMinBuildHeight();
+        for (int py = y - 1; py > bottom; py--) {
+            if (!loaded.isLoaded(x, z)) {
+                return false; // 水柱穿过未加载区块:底下有什么不知道
+            }
+            BlockState below = view.getBlockState(new BlockPos(x, py, z));
+            if (isDeadlyToBePushedInto(below)) {
+                return false; // 水柱底部是岩浆/火:人被按进去就没了
+            }
+            if (isWater(below)) {
+                // 水柱落进水里(池塘/湖面/另一条水柱):人浮在水面上,是安全的着落。
+                // 底线只查"这片水底下是不是要命的东西" —— 水接水一层层往下看,遇到
+                // 岩浆/火/虚空才算危险(瀑布砸进岩浆池、或一路砸进峡谷)。
+                return waterBaseIsSafe(view, loaded, x, py, z);
+            }
+            if (!below.getFluidState().isEmpty()) {
+                return false; // 落到岩浆之外的别的液体上:不赌
+            }
+            if (canWalkOn(view, loaded, x, py, z, below)) {
+                return true; // 水柱落在地面/泳道上:游到底就是岸
+            }
+            if (!canWalkThrough(view, loaded, x, py, z, below)) {
+                return false; // 撞上不能穿也不能站的方块(栅栏之类):别往这条水柱里规划
+            }
+        }
+        return false; // 一路通到世界底:虚空 / 深谷
     }
 
     /**
@@ -857,7 +1022,41 @@ public final class MovementHelper {
         return false; // 下游两格都有着落
     }
 
-    /** 被推着撞上这格会不会要命。比 {@link #avoidWalkingInto} 窄一层:水不算 —— 水就是路。 */
+    /**
+     * (x,y,z) 这片水的<b>底下</b>安不安全:水接水一层层往下扫,直到
+     * <ul>
+     *   <li>要命的东西(岩浆/火/岩浆块/仙人掌/甜浆果/末地门)→ 不安全;</li>
+     *   <li>能站住的地面 → 安全(浅水塘、河床、海底都算);</li>
+     *   <li>一路到世界底 → 不安全(虚空)。</li>
+     * </ul>
+     * 水柱落点用得到它:瀑布砸下来的那片池塘是安全着陆点,砸进岩浆池就不是。
+     */
+    private static boolean waterBaseIsSafe(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        int bottom = view.getMinBuildHeight();
+        int limit = y - WATER_BASE_LOOKDOWN;
+        for (int py = y; py > bottom && py >= limit; py--) {
+            if (!loaded.isLoaded(x, z)) {
+                return false; // 看不清就按危险处理,不赌
+            }
+            BlockState state = view.getBlockState(new BlockPos(x, py, z));
+            if (isDeadlyToBePushedInto(state)) {
+                return false; // 这片水底下是岩浆:掉进去就没了
+            }
+            if (isWater(state) || state.isAir()) {
+                continue; // 水接水、水下面还有一层空腔:继续往下找底
+            }
+            return canWalkOn(view, loaded, x, py, z, state); // 找到能站住的水底才算安全
+        }
+        return false; // 看不到底(峡谷/虚空):不赌
+    }
+
+    /**
+     * 撞上/落进这格会不会要命。比 {@link #avoidWalkingInto} 窄一层:水不算 —— 水就是路。
+     *
+     * <p>气泡柱曾经(以及 {@link #avoidWalkingInto} 里现在仍然)在这一列,但对"水柱
+     * 底下有什么"这个探针来说是错的:向上气泡柱恰恰是原版把人<b>送上去</b>的东西,而
+     * 向下气泡柱也不是岩浆(按跳浮得出去)。真正该拦的是"一旦进去就没了"的那几种。
+     */
     private static boolean isDeadlyToBePushedInto(BlockState state) {
         Block block = state.getBlock();
         return isLava(state)
@@ -865,7 +1064,6 @@ public final class MovementHelper {
                 || block == Blocks.MAGMA_BLOCK
                 || block == Blocks.CACTUS
                 || block == Blocks.SWEET_BERRY_BUSH
-                || block == Blocks.BUBBLE_COLUMN
                 || block == Blocks.END_PORTAL;
     }
 
@@ -885,16 +1083,47 @@ public final class MovementHelper {
     }
 
     /**
+     * 该格的水价档:浮着(见 {@link #isFloatingAt})就用 {@code FLOATING_DEPTH} 那一档
+     * ——原版在水里离地时深海探索者只算一半({@code if (!onGround()) h *= 0.5},
+     * 见 {@link CalculationContext.WaterCost});踩得到底就是涉水档 {@code WADING_DEPTH}。
+     *
+     * <p><b>为什么非要有这一档</b>(现象 1 的模型侧):{@link CalculationContext#waterWalkSpeed}
+     * 是<b>一次搜索一个值</b>,取的是涉水档。深水横渡时脚那格是水、脚下也是水,人是浮着的,
+     * 却一直按涉水档收钱 —— 有深海探索者时这就是"深水里按踩底的速度定价",再叠上
+     * 泳道里 {@code isWater(pb0)} 为真而把疾跑折扣关掉,泳道就比湖底(脚在干格上、
+     * 吃到疾跑折扣)还贵,规划器于是把深水横渡整条压在湖底当陆地走。
+     */
+    public static double waterTierCost(CalculationContext context, double baseWaterCost,
+                                       int destX, int destY, int destZ) {
+        if (!isFloatingAt(context, destX, destY, destZ)) {
+            return baseWaterCost; // 踩得到底:涉水档
+        }
+        return CalculationContext.WaterCost.cost(context.waterDepthStrider,
+                CalculationContext.WaterCost.FLOATING_DEPTH);
+    }
+
+    /**
      * 穿越一格流水的水价(顺流便宜、横渡原价、逆流贵),危险流向直接
-     * {@link ActionCosts#COST_INF}。不是横向流水就原样返回 {@code baseWaterCost}
-     * ——静水、无水、以及"这就是个普通水格"的情形一格不涨价。
+     * {@link ActionCosts#COST_INF};下落水柱走另一档(向上贵、向下便宜,见
+     * {@link FlowCost#fallingWaterCost}),水柱底下要命时同样 {@code COST_INF}。
+     * 静水、无水、以及"这就是个普通水格"的情形一格不涨价。
      *
      * @param baseWaterCost 该档"没有水流"的水价({@link CalculationContext#waterWalkSpeed})
+     * @param fromY         起点脚位的高度,只给下落水柱算落差用({@code destY - fromY})
      * @return 每格成本(tick);{@link ActionCosts#COST_INF} 表示水流会把人送进危险里
      */
-    public static double waterMoveCost(CalculationContext context, int fromX, int fromZ,
+    public static double waterMoveCost(CalculationContext context, int fromX, int fromZ, int fromY,
                                        int destX, int destY, int destZ, double baseWaterCost) {
         FluidState fluidState = context.get(destX, destY, destZ).getFluidState();
+        if (isFallingWater(fluidState)) {
+            // 下落水柱:推力竖直朝下,顺水柱下去便宜、逆着上浮贵(见 FlowCost.fallingWaterCost)。
+            // 底线先判:水柱底下是岩浆/虚空就不许进(与横向流水的流向探针同一条规矩)。
+            if (!NavSettings.get().allowFallingWater
+                    || !fallingWaterTerminatesSafely(context.view, context.loadedTest, destX, destY, destZ)) {
+                return COST_INF;
+            }
+            return FlowCost.fallingWaterCost(baseWaterCost, destY - fromY, context.waterDepthStrider);
+        }
         if (!isHorizontalWaterFlow(fluidState)) {
             return baseWaterCost; // 静水 / 不是水:与放行流水之前同价
         }

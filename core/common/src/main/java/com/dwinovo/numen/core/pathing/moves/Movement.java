@@ -209,8 +209,18 @@ public abstract class Movement {
         player.getAbilities().flying = false;
         currentState = updateState(currentState);
         BlockPos feet = feet(player);
-        if (MovementHelper.isLiquid(player.level().getBlockState(feet))
-                && player.getY() < dest.getY() + 0.6) {
+        boolean feetInLiquid = MovementHelper.isLiquid(player.level().getBlockState(feet));
+        // 浮着(脚与脚下一格都是水)就<b>每 tick</b> 按跳 —— 原版 LivingEntity.aiStep 里
+        // 按跳在液体中走的是 jumpInLiquid(每 tick +0.04 的划水),正是浮力:身体因此稳在
+        // 水面附近,不会一路沉到湖底"如履平地";而下落水柱的推力竖直向下,也正是这一点
+        // 上浮冲量让人能逆着水柱游上去(这是本轮把水柱从"墙"改成"价"的前提)。
+        //
+        // 只对<b>浮着</b>的身体按:浅水涉水时脚踩得到底,持续按跳会变成一路蹦
+        // (那里本来就不减速,见 WaterCost 的涉水档)。原来那条"低于目标才按"的判据
+        // 留着,是为了别在往下走时跟重力对拉。
+        boolean floating = MovementHelper.isFloatingAt(player.level(), ChunkLoadedTest.ALWAYS,
+                feet.getX(), feet.getY(), feet.getZ());
+        if (feetInLiquid && (floating || player.getY() < dest.getY() + 0.6)) {
             currentState.setInput(Input.JUMP, true);
         }
         if (player.isInWall()) {

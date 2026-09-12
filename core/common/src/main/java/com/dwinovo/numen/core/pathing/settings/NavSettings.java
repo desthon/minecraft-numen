@@ -89,6 +89,20 @@ public final class NavSettings {
      * ——那两种流体永远不可穿(推力竖直向下 / 要命)。
      */
     public boolean allowFlowingWater = true;
+    /**
+     * 允许把<b>下落水柱</b>(原版 FALLING,方的 LEVEL ≥ 8、水量恒 8)当可穿越地形,
+     * 代价按落差分档(向上贵、向下便宜,见
+     * {@link com.dwinovo.numen.core.pathing.moves.FlowCost#fallingWaterCost})。默认开。
+     *
+     * <p>上一轮它被留成硬墙,理由是"执行侧在液体里不按 JUMP、没有上浮输入,放行就是
+     * 能规划走不动"。本轮把那半个前提补上了:{@link com.dwinovo.numen.core.pathing.moves.Movement}
+     * 在水里持续按跳(原版 {@code jumpInLiquid} = 每 tick +0.04,正是浮力),于是
+     * 逆着水柱也游得上去 —— 墙才改得成价。<b>水柱底部是要命地形(岩浆/火/岩浆块/
+     * 虚空)时照旧不可穿</b>(见 {@code MovementHelper.fallingWaterTerminatesSafely})。
+     *
+     * <p>关掉即退回旧语义:下落水柱一律绕路。留这个开关同样是为了一键对比。
+     */
+    public boolean allowFallingWater = true;
     /** 视岩浆面为可行走地面(默认关)。 */
     public boolean assumeWalkOnLava = false;
     /** 假定有自动上台阶能力(上一格无需跳跃)。 */

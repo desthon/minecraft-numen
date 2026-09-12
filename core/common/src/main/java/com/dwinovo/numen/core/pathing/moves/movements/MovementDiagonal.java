@@ -121,8 +121,10 @@ public class MovementDiagonal extends Movement {
             if (ascend) {
                 return;
             }
-            // 浮在水里,脚下是什么都不再重要:覆盖之前所有修正
-            multiplier = context.waterWalkSpeed;
+            // 浮在水里,脚下是什么都不再重要:覆盖之前所有修正。档位照 traverse 的规矩选
+            // (浮着 = 原版附魔减半,见 waterTierCost);水流分档不在这一支做 ——
+            // 对角本来就要让位给两个直步(单侧堵死时才按 √2−ε 绕行)。
+            multiplier = MovementHelper.waterTierCost(context, context.waterWalkSpeed, destX, y, destZ);
             water = true;
         }
         BlockState pb0 = context.get(x, y, destZ);
