@@ -61,7 +61,7 @@ public final class ContextFactory {
 
     /** 无目标格/禁放格开关的搜索用冻结上下文。 */
     public static CalculationContext forSearch(ServerPlayer player, TerrainPermit permit) {
-        return forSearch(player, LongSets.emptySet(), LongSets.emptySet(), permit);
+        return forSearch(player, LongSets.EMPTY_SET, LongSets.EMPTY_SET, permit);
     }
 
     /**
@@ -86,6 +86,6 @@ public final class ContextFactory {
 
     /** 无目标格/禁放格开关的执行期实时上下文。 */
     public static CalculationContext forExecution(ServerPlayer player, TerrainPermit permit) {
-        return forExecution(player, LongSets.emptySet(), LongSets.emptySet(), permit);
+        return forExecution(player, LongSets.EMPTY_SET, LongSets.EMPTY_SET, permit);
     }
 }

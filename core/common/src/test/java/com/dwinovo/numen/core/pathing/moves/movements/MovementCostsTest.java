@@ -8,6 +8,7 @@ import com.dwinovo.numen.core.pathing.moves.ActionCosts;
 import com.dwinovo.numen.core.pathing.moves.CalculationContext;
 import com.dwinovo.numen.core.pathing.moves.TerrainPermit;
 import com.dwinovo.numen.core.pathing.moves.ChunkLoadedTest;
+import com.dwinovo.numen.core.pathing.moves.MovementHelper;
 import com.dwinovo.numen.core.pathing.moves.MutableMoveResult;
 import com.dwinovo.numen.core.pathing.settings.NavSettings;
 
@@ -263,6 +264,100 @@ class MovementCostsTest {
         CalculationContext ctx = context(v);
         double cost = MovementDownward.cost(ctx, 0, 64, 0);
         assertEquals(5.6147 + 15 + NavSettings.get().blockBreakAdditionalPenalty, cost, EPS);
+    }
+
+    // ==================== 邻格流体 / 冰:能挖的只贵不堵,要命的仍然堵(bug 2) ====================
+
+    /** 这台 FakeView 的 set 收 int 坐标(与 ProtectionPinsTest 那台的签名不同)。 */
+    private static void put(FakeView view, BlockPos pos, BlockState state) {
+        view.set(pos.getX(), pos.getY(), pos.getZ(), state);
+    }
+
+    /**
+     * 挖一格"紧挨着水"的方块:有限的高倍罚金,不再是 COST_INF。
+     *
+     * <p>旧行为是硬禁 —— 地下挖矿时脚边有水是常态(矿井、含水层、河道底下),
+     * 硬禁的代价是"该挖的矿碰都不碰",于是她贴着矿脉绕圈。
+     */
+    @Test
+    void breakingBesideWaterIsPricedNotBanned() {
+        FakeView v = floored();
+        BlockPos target = SRC.north();
+        put(v, target, Blocks.DIRT.defaultBlockState());
+        double plain = MovementHelper.getMiningDurationTicks(
+                context(v), target.getX(), target.getY(), target.getZ(), false);
+        put(v, target.east(), Blocks.WATER.defaultBlockState());   // 邻格一桶水(源方块)
+        double besideWater = MovementHelper.getMiningDurationTicks(
+                context(v), target.getX(), target.getY(), target.getZ(), false);
+        assertTrue(besideWater < ActionCosts.COST_INF,
+                "邻格是水不该是无穷价(旧行为),实为 " + besideWater);
+        assertTrue(besideWater > plain, "有水该更贵:plain=" + plain + " water=" + besideWater);
+        assertEquals(plain * NavSettings.get().waterAdjacentBreakPenaltyMultiplier,
+                besideWater, EPS, "邻水只是一次倍数罚金,不该掺别的项");
+    }
+
+    /** 含水方块(waterlogged)当邻格:同样只是贵,不是禁。 */
+    @Test
+    void waterloggedNeighbourIsPricedNotBanned() {
+        FakeView v = floored();
+        BlockPos target = SRC.north();
+        put(v, target, Blocks.DIRT.defaultBlockState());
+        put(v, target.east(), Blocks.OAK_SLAB.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED, true));
+        double cost = MovementHelper.getMiningDurationTicks(
+                context(v), target.getX(), target.getY(), target.getZ(), false);
+        assertTrue(cost > 0 && cost < ActionCosts.COST_INF, "含水邻格该是有限价,实为 " + cost);
+    }
+
+    /** 上方是水(挖开就是头顶淋水):同样有限,而且罚得最狠。 */
+    @Test
+    void waterOverheadIsPricedNotBanned() {
+        FakeView v = floored();
+        BlockPos target = SRC.north();
+        put(v, target, Blocks.DIRT.defaultBlockState());
+        put(v, target.above(), Blocks.WATER.defaultBlockState());
+        double cost = MovementHelper.getMiningDurationTicks(
+                context(v), target.getX(), target.getY(), target.getZ(), false);
+        assertTrue(cost > 0 && cost < ActionCosts.COST_INF, "头顶是水该是有限价,实为 " + cost);
+    }
+
+    /** 冰能挖:它本来就是水,挖掉只是开出一条路(旧行为是硬禁,冰原上宁可绕一整圈)。 */
+    @Test
+    void iceIsBreakable() {
+        FakeView v = floored();
+        BlockPos ice = SRC.north();
+        put(v, ice, Blocks.ICE.defaultBlockState());
+        double cost = MovementHelper.getMiningDurationTicks(
+                context(v), ice.getX(), ice.getY(), ice.getZ(), false);
+        assertTrue(cost > 0 && cost < ActionCosts.COST_INF, "冰应当能挖(旧行为:硬禁),实为 " + cost);
+    }
+
+    /**
+     * 贴着岩浆仍然是硬禁(COST_INF)—— 水降级<b>不许</b>顺带把岩浆也降级:
+     * 水只会把她冲离路径,岩浆是要命的。
+     */
+    @Test
+    void breakingBesideLavaStaysInfinite() {
+        FakeView v = floored();
+        BlockPos target = SRC.north();
+        put(v, target, Blocks.DIRT.defaultBlockState());
+        put(v, target.east(), Blocks.LAVA.defaultBlockState());
+        double cost = MovementHelper.getMiningDurationTicks(
+                context(v), target.getX(), target.getY(), target.getZ(), false);
+        assertTrue(cost >= ActionCosts.COST_INF, "贴着岩浆必须仍是硬禁,实为 " + cost);
+    }
+
+    /** 邻格是悬空落沙:同样仍是硬禁(挖了会塌下来埋住自己)。 */
+    @Test
+    void breakingBesideFallingSandStaysInfinite() {
+        FakeView v = floored();
+        // 地板在 y=63,所以抬到 y=65 才有"下面悬空"的沙子(沙柱塌下来会埋住她)
+        BlockPos target = SRC.north().above();
+        put(v, target, Blocks.DIRT.defaultBlockState());
+        put(v, target.east(), Blocks.SAND.defaultBlockState());   // 正下方是空气 → 悬空
+        double cost = MovementHelper.getMiningDurationTicks(
+                context(v), target.getX(), target.getY(), target.getZ(), false);
+        assertTrue(cost >= ActionCosts.COST_INF, "悬空落沙邻格必须仍是硬禁,实为 " + cost);
     }
 
     // ==================== 跑酷 ====================

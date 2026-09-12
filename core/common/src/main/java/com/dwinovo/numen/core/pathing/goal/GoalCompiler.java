@@ -76,7 +76,7 @@ public final class GoalCompiler {
     /** Occupy exactly this cell. Nothing sacred. */
     public static Compiled standOn(BlockPos cell) {
         BlockPos c = cell.immutable();
-        return new Compiled(NavGoal.exact(c), LongSets.emptySet());
+        return new Compiled(NavGoal.exact(c), LongSets.EMPTY_SET);
     }
 
     /** Stand orthogonally beside {@code target} (a placement stance): the
@@ -94,7 +94,7 @@ public final class GoalCompiler {
      */
     public static Compiled near(BlockPos center, double radius) {
         BlockPos c = center.immutable();
-        return new Compiled(NavGoal.nearGround(c, radius), LongSets.emptySet());
+        return new Compiled(NavGoal.nearGround(c, radius), LongSets.EMPTY_SET);
     }
 
     /** The {@code resolveBlockGoal} replacement: a walkable cell is a place to
@@ -128,9 +128,14 @@ public final class GoalCompiler {
             members.add(NavGoal.mineStance(ore));
         }
         for (BlockPos drop : drops) {
-            members.add(NavGoal.exact(drop));     // items, not blocks
+            // 掉落物是"走过去踩到"的目标,不是"站进去"的格子——它压根不是方块。
+            // exact(drop) 要求脚位恰好落在物品实体所在的那一格:物品浮在台阶/雪上、
+            // 落在半砖边、或者被水推了半格,判据就永远不成立,成员白占一个位置,
+            // 身体反而被别的矿位拉走。1 格球邻域与 LootSweep 收战利品用的是同一条
+            // (core/common/.../core/task/combat/LootSweep.goal):到达 = 走到它跟前的那一格。
+            members.add(NavGoal.near(drop, 1.0));
         }
-        return new Compiled(NavGoal.composite(members), LongSets.emptySet());
+        return new Compiled(NavGoal.composite(members), LongSets.EMPTY_SET);
     }
 
     /**

@@ -319,13 +319,47 @@ public final class BlockHelper {
      */
     public static boolean canPlaceAgainst(BlockGetter level, BlockPos pos, Direction face) {
         BlockState state = level.getBlockState(pos);
-        Block b = state.getBlock();
-        if (b instanceof BambooStalkBlock || b instanceof MovingPistonBlock
-                || b instanceof ScaffoldingBlock || b instanceof ShulkerBoxBlock
-                || b instanceof PointedDripstoneBlock || b instanceof AmethystClusterBlock) {
+        if (placementFaceRefused(state)) {
             return false;
         }
         return state.isFaceSturdy(level, pos, face);
+    }
+
+    /**
+     * 无坐标版的同一个问题:"这一格<b>有没有任何一个面</b>能当放置贴面"。
+     *
+     * <p>规划期只在 {@code CalculationContext} 的 int 坐标域里走,拿不到 {@link BlockPos}
+     * 也拿不到真世界(而且要能在 worker 线程上跑),所以这里用
+     * {@link net.minecraft.world.level.EmptyBlockGetter} + 原点问形状:绝大多数方块的
+     * 碰撞形状与 level/pos 无关,形状取不到的异类按"不可贴"处理(保守,不是崩溃)。
+     *
+     * <p><b>按面判而不是按方块判</b>是这一步的重点:下半台阶的顶面在格子内部(射线在边界上
+     * 打不中),可它的<b>底面</b>是齐平的;楼梯的背、灵魂沙的顶面同理。旧判据只认"完整
+     * 实心方块或玻璃",把这些能站的、能贴的表面全判死了。
+     */
+    public static boolean canPlaceAgainstAnyFace(BlockState state) {
+        if (placementFaceRefused(state)) {
+            return false;
+        }
+        for (Direction face : Direction.values()) {
+            try {
+                if (state.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE,
+                        BlockPos.ZERO, face)) {
+                    return true;
+                }
+            } catch (RuntimeException ignored) {
+                // 拿不到碰撞形状的异类:这一面按不可贴
+            }
+        }
+        return false;
+    }
+
+    /** 行为异常、形状判定说了不算的方块:竹/移动活塞/脚手架/潜影盒/滴水石锥/紫水晶簇。 */
+    private static boolean placementFaceRefused(BlockState state) {
+        Block b = state.getBlock();
+        return b instanceof BambooStalkBlock || b instanceof MovingPistonBlock
+                || b instanceof ScaffoldingBlock || b instanceof ShulkerBoxBlock
+                || b instanceof PointedDripstoneBlock || b instanceof AmethystClusterBlock;
     }
 
     /**

@@ -6,7 +6,8 @@
   "refmap": "numen.refmap.json",
   "mixins": [
     "FishingHookAccessor",
-    "ServerLevelBlockChangeMixin"
+    "ServerLevelBlockChangeMixin",
+    "ServerPlayerGameModePlaceMixin"
   ],
   "client": [],
   "server": [],

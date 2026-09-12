@@ -105,7 +105,7 @@ public final class PlayerNav {
      * 最近一次拉取的目标的 sacred 格({@code BlockPos.asLong()} 键)。
      * 每次拉目标同步刷新——goal 与 sacred 是同一份契约,不允许分开读。
      */
-    private LongSet sacred = LongSets.emptySet();
+    private LongSet sacred = LongSets.EMPTY_SET;
     /**
      * 执行层证明"无支撑放不上"(NO_SUPPORT)的格,本次导航内累积、
      * 穿进此后每次搜索,确定性重搜才不会反复规划同一个不可能的脚手架。
@@ -240,7 +240,7 @@ public final class PlayerNav {
         return () -> {
             NavGoal g = goals.get();
             return g == null ? null
-                    : new GoalCompiler.Compiled(g, LongSets.emptySet());
+                    : new GoalCompiler.Compiled(g, LongSets.EMPTY_SET);
         };
     }
 

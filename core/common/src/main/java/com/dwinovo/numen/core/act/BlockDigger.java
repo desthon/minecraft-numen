@@ -5,6 +5,7 @@ import com.dwinovo.numen.entity.InputDriver;
 
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.core.pathing.util.BlockHelper;
+import com.dwinovo.numen.core.scan.OwnerBuildMemory;
 import com.dwinovo.numen.core.act.ToolSelect;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -140,13 +141,19 @@ public final class BlockDigger {
         // sight (leaves in front, a tight column overhead) — fall back to breaking the
         // occluder: aim at the target's centre and break whatever the
         // crosshair actually hits, opening the way, instead of holding forever for a clear angle.
-        // One guard: never grind a do_not_break / container block as the occluder.
+        // Two guards, same place: never grind a do_not_break / container block as the occluder,
+        // and never chew through a block the player placed by hand. The occluder fallback exists
+        // to open a line of sight through leaves and thin cover — it is not a licence to demolish
+        // the owner's wall because a target happens to sit behind it. (The EXPLICIT target is a
+        // different matter: that one was picked on purpose, and break_block / mine naming it is
+        // the human's authorisation. Only the incidental collateral is refused here.)
         BlockHitResult hit = reachableHit(target);
         BlockPos effective = target;
         if (hit == null) {
             BlockHitResult center = centerRaycast(target);
             if (center != null && !center.getBlockPos().equals(target)
-                    && !BlockHelper.shouldAvoidBreaking(level, center.getBlockPos())) {
+                    && !BlockHelper.shouldAvoidBreaking(level, center.getBlockPos())
+                    && !OwnerBuildMemory.isProtected(level, center.getBlockPos())) {
                 hit = center;
                 effective = center.getBlockPos();
             }

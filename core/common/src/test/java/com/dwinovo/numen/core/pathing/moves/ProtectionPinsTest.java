@@ -179,7 +179,7 @@ class ProtectionPinsTest {
 
     private static CalculationContext context(FakeView view, LongSet sacred) {
         return new CalculationContext(player, view, ChunkLoadedTest.ALWAYS, false,
-                sacred, LongSets.emptySet(), TerrainPermit.TERRAFORM);
+                sacred, LongSets.EMPTY_SET, TerrainPermit.TERRAFORM);
     }
 
     private static LongSet sacredOf(BlockPos pos) {
@@ -197,18 +197,18 @@ class ProtectionPinsTest {
         v.setChest(chest);
         // 箱子在 NavSettings.blocksToAvoidBreaking 默认清单内 → ×10 软成本(有限价)
         double soft = MovementHelper.getMiningDurationTicks(
-                context(v, LongSets.emptySet()),
+                context(v, LongSets.EMPTY_SET),
                 chest.getX(), chest.getY(), chest.getZ(), false);
         assertTrue(soft > 0 && soft < COST_INF, "软惩罚箱子应有有限价,实为 " + soft);
         // 对照:普通泥土无软惩罚,应显著更便宜(软惩罚真实生效)
         BlockPos dirt = SRC.south();
         v.set(dirt, Blocks.DIRT.defaultBlockState());
         double plain = MovementHelper.getMiningDurationTicks(
-                context(v, LongSets.emptySet()),
+                context(v, LongSets.EMPTY_SET),
                 dirt.getX(), dirt.getY(), dirt.getZ(), false);
         assertTrue(plain < soft, "软惩罚应贵于普通方块,soft=" + soft + " plain=" + plain);
         // 端到端:北向平移(要挖穿箱子)产出有限边(不是 INF)
-        double cost = Moves.TRAVERSE_NORTH.cost(context(v, LongSets.emptySet()),
+        double cost = Moves.TRAVERSE_NORTH.cost(context(v, LongSets.EMPTY_SET),
                 SRC.getX(), SRC.getY(), SRC.getZ());
         assertTrue(cost > 0 && cost < COST_INF, "穿箱平移应有限价,实为 " + cost);
     }
@@ -226,7 +226,7 @@ class ProtectionPinsTest {
                         .wrapAsHolder(Blocks.STONE))));
         try {
             assertTrue(MovementHelper.getMiningDurationTicks(
-                    context(v, LongSets.emptySet()),
+                    context(v, LongSets.EMPTY_SET),
                     stone.getX(), stone.getY(), stone.getZ(), false) >= COST_INF,
                     "标签成员应计 INF");
         } finally {
@@ -249,7 +249,7 @@ class ProtectionPinsTest {
         v.set(dirt, Blocks.DIRT.defaultBlockState());
         // 未保护:同地形泥土障碍有限价(证明后面翻成 INF 的是 sacred)
         double open = MovementHelper.getMiningDurationTicks(
-                context(v, LongSets.emptySet()),
+                context(v, LongSets.EMPTY_SET),
                 dirt.getX(), dirt.getY(), dirt.getZ(), false);
         assertTrue(open > 0 && open < COST_INF, "未保护的泥土应有限价,实为 " + open);
         // sacred:一模一样的地形,该格是导航自身的目标 → INF
@@ -266,7 +266,7 @@ class ProtectionPinsTest {
         FakeView v = floored();
         v.set(dirt, Blocks.DIRT.defaultBlockState());
         CalculationContext preserve = new CalculationContext(player, v, ChunkLoadedTest.ALWAYS,
-                false, LongSets.emptySet(), LongSets.emptySet(), TerrainPermit.PRESERVE);
+                false, LongSets.EMPTY_SET, LongSets.EMPTY_SET, TerrainPermit.PRESERVE);
         // 同一块泥土,TERRAFORM 有限价(见上),PRESERVE 无限价——翻成 INF 的只是许可
         assertTrue(MovementHelper.getMiningDurationTicks(preserve,
                 dirt.getX(), dirt.getY(), dirt.getZ(), false) >= COST_INF);
@@ -291,7 +291,7 @@ class ProtectionPinsTest {
         LongSet denied = new LongOpenHashSet();
         denied.add(cell.asLong());
         CalculationContext deniedCtx = new CalculationContext(player, v, ChunkLoadedTest.ALWAYS,
-                false, LongSets.emptySet(), denied, TerrainPermit.TERRAFORM);
+                false, LongSets.EMPTY_SET, denied, TerrainPermit.TERRAFORM);
         assertEquals(COST_INF, deniedCtx.costOfPlacingAt(
                 cell.getX(), cell.getY(), cell.getZ(), v.getBlockState(cell)));
     }

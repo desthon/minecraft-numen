@@ -1,8 +1,10 @@
 package com.dwinovo.numen.core.pathing.moves;
 
 import com.dwinovo.numen.core.pathing.settings.NavSettings;
+import com.dwinovo.numen.core.pathing.util.BlockHelper;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.AirBlock;
@@ -382,11 +384,22 @@ public final class MovementHelper {
     // ==================== 禁挖判定 ====================
 
     /**
-     * 挖 (x,y,z) 是否被<b>物理上</b>禁止:世界边界外拒绝(内缩一格,边界外的方块
-     * 没法贴放/挖到);冰(挖了变水搅乱路径)、被虫蚀方块,以及上方/四个
-     * 水平邻格的液体与悬空落沙规则。保护性的硬禁挖(do_not_break 标签)不在
-     * 这里——那是 {@link CalculationContext#breakCostMultiplierAt} 的事,
-     * 硬禁挖的唯一真源是那个标签。
+     * 挖 (x,y,z) 是否被<b>物理上</b>禁止(代价无穷)。禁的只剩"要命的与动不了的":
+     * <ul>
+     *   <li>世界边界外(内缩一格)——那里连贴放/瞄准都做不到;</li>
+     *   <li>被虫蚀方块(挖了放出蠹虫);</li>
+     *   <li>上方/四个水平邻格是要命的东西:岩浆(挖开就引过来)、悬空的落沙
+     *       (挖了会塌下来埋住她)。见 {@link #avoidAdjacentBreaking}。</li>
+     * </ul>
+     *
+     * <p><b>曾经在这里、已经出去了的两条</b>(bug 2:过度保守)——
+     * <b>冰</b>:挖掉冰只是开出一条路(它本来就是水),曾经当硬禁的结果是冰原/冻洋上
+     * 宁可绕一整圈也不肯凿一块;<b>邻格是水</b>:水会灌下来把她冲离路径,但不会要命,
+     * 降级成有限的高倍罚金({@link #neighbourFluidBreakMultiplier}),因为地下挖矿时
+     * 脚边有水是常态,硬禁等于"该挖的矿碰都不碰"。
+     *
+     * <p>保护性的硬禁挖(do_not_break 标签、玩家自己放过的方块)不在这里 ——
+     * 那是 {@link CalculationContext#breakCostMultiplierAt} 的事。
      */
     public static boolean avoidBreaking(CalculationContext context, int x, int y, int z, BlockState state) {
         if (context.worldBorder != null
@@ -397,8 +410,7 @@ public final class MovementHelper {
             return true;
         }
         Block b = state.getBlock();
-        return b == Blocks.ICE
-                || b instanceof InfestedBlock
+        return b instanceof InfestedBlock
                 || avoidAdjacentBreaking(context, x, y + 1, z, true)
                 || avoidAdjacentBreaking(context, x + 1, y, z, false)
                 || avoidAdjacentBreaking(context, x - 1, y, z, false)
@@ -407,11 +419,14 @@ public final class MovementHelper {
     }
 
     /**
-     * 邻格 (x,y,z) 是否让"挖它旁边那格"变得危险。只查上方与四个
-     * 水平向,不查下方。上方是落沙类不禁(整根沙柱的连锁挖掘成本
-     * 已计入);上方是液体必禁。水平向:悬空的落沙类会被更新塌下
-     * 来 → 禁;液体源爱水平漫延 → 禁;流动液体只要下方不是液体
-     * (会向水平流)→ 禁。
+     * 邻格 (x,y,z) 是否让"挖它旁边那格"变得<b>要命</b>(=代价无穷)。只查上方与四个
+     * 水平向,不查下方。上方是落沙类不禁(整根沙柱的连锁挖掘成本已计入);其他邻格:
+     * 悬空的落沙类会被更新塌下来 → 禁;岩浆(源或流)→ 禁;从严开关
+     * ({@code strictLiquidCheck})打开时任何相邻流体 → 禁。
+     *
+     * <p>水不在这个集合里:它由 {@link #neighbourFluidBreakMultiplier} 折成有限罚金。
+     * 判据(源方块爱水平漫延 / 会向水平流的流 / 含水方块)与降级前逐条一致,只是
+     * 换了后果。
      */
     public static boolean avoidAdjacentBreaking(CalculationContext context, int x, int y, int z, boolean directlyAbove) {
         BlockState state = context.get(x, y, z);
@@ -422,18 +437,67 @@ public final class MovementHelper {
                 && FallingBlock.isFree(context.get(x, y - 1, z))) {
             return true;
         }
-        // 只按纯液体方块判(含水方块可能有封闭底面,不算)
-        if (block instanceof LiquidBlock) {
-            if (directlyAbove || NavSettings.get().strictLiquidCheck) {
-                return true;
-            }
+        if (isLava(state)) {
+            return true;   // 岩浆:源方块与流动的都是硬禁(挖开就是一条烧到身上的河)
+        }
+        if (NavSettings.get().strictLiquidCheck && !state.getFluidState().isEmpty()) {
+            return true;   // 从严开关:任何相邻液体都禁挖(含含水方块)
+        }
+        return false;
+    }
+
+    /**
+     * 挖 (x,y,z) 时"邻格有水"带来的成本乘数(没有邻水就是 1.0)。
+     *
+     * <p>与 {@link #avoidAdjacentBreaking} 互补:那边管<b>要命的</b>(岩浆/塌方/世界边界),
+     * 这边管<b>会漫过来的</b>。水在挖穿之后会顺着缺口流下来,淹掉一段通道、把她冲离路径
+     * —— 贵,但不是不能挖。判据沿用降级前那一套:
+     * <ul>
+     *   <li>上方是水:永远算(挖开就是头顶淋水);</li>
+     *   <li>水平向的<b>源</b>方块:爱向水平漫延 → 算;</li>
+     *   <li>水平向的<b>流水</b>:只要它下方不是液体就会继续向水平流 → 算;</li>
+     *   <li><b>含水方块</b>(half-submerged 的楼梯/台阶之类):挖开旁边会渗水 → 算。</li>
+     * </ul>
+     * 多个方向命中就连乘,所以夹角里的那一格最贵。
+     */
+    public static double neighbourFluidBreakMultiplier(CalculationContext context, int x, int y, int z) {
+        double penalty = context.waterAdjacentBreakMultiplier;
+        double mult = 1.0;
+        if (waterNeighbourRisk(context, x, y + 1, z, true)) {
+            mult *= penalty;
+        }
+        if (waterNeighbourRisk(context, x + 1, y, z, false)) {
+            mult *= penalty;
+        }
+        if (waterNeighbourRisk(context, x - 1, y, z, false)) {
+            mult *= penalty;
+        }
+        if (waterNeighbourRisk(context, x, y, z + 1, false)) {
+            mult *= penalty;
+        }
+        if (waterNeighbourRisk(context, x, y, z - 1, false)) {
+            mult *= penalty;
+        }
+        return mult;
+    }
+
+    /** 邻格的水会不会在挖穿之后漫过来(见 {@link #neighbourFluidBreakMultiplier})。 */
+    private static boolean waterNeighbourRisk(CalculationContext context, int x, int y, int z, boolean directlyAbove) {
+        BlockState state = context.get(x, y, z);
+        if (!isWater(state)) {
+            return false;
+        }
+        if (directlyAbove || NavSettings.get().strictLiquidCheck) {
+            return true;
+        }
+        if (state.getBlock() instanceof LiquidBlock) {
             int level = state.getValue(LiquidBlock.LEVEL);
             if (level == 0) {
-                return true; // 源方块爱水平漫延
+                return true;   // 源方块爱水平漫延
             }
             return !(context.getBlock(x, y - 1, z) instanceof LiquidBlock);
         }
-        return !state.getFluidState().isEmpty();
+        return true;           // 含水方块(水 logged):挖开旁边会渗出来
     }
 
     // ==================== 破坏成本 ====================
@@ -444,8 +508,13 @@ public final class MovementHelper {
 
     /**
      * 挖穿该格的成本(tick)。本就可穿行 → 0;流体 → INF;
-     * 禁挖 → INF;否则 1/速度 + 附加罚金,再乘上下文乘数。
+     * 禁挖 → INF;否则 1/速度 + 附加罚金,再乘上下文乘数与邻水罚金。
      * {@code includeFalling} 时向上递归叠加整根落沙柱的成本。
+     *
+     * <p>三处 INF 的分工:{@code breakCostMultiplierAt} 管"不许"(sacred /
+     * do_not_break 标签 / 玩家自己放的 / 许可), {@link #avoidBreaking} 管"要命"
+     * (世界边界 / 虫蚀 / 岩浆 / 塌方),剩下能挖的东西只贵不堵
+     * ({@link #neighbourFluidBreakMultiplier})。
      */
     public static double getMiningDurationTicks(CalculationContext context, int x, int y, int z,
                                                 BlockState state, boolean includeFalling) {
@@ -466,7 +535,7 @@ public final class MovementHelper {
             }
             double result = 1 / strVsBlock;
             result += context.breakBlockAdditionalCost;
-            result *= mult;
+            result *= mult * neighbourFluidBreakMultiplier(context, x, y, z);
             if (includeFalling) {
                 BlockState above = context.get(x, y + 1, z);
                 if (above.getBlock() instanceof FallingBlock) {
@@ -517,7 +586,7 @@ public final class MovementHelper {
                 && !placeableWithinBorder(live.getWorldBorder(), pos.getX(), pos.getZ())) {
             return false;
         }
-        return canPlaceAgainst(level.getBlockState(pos));
+        return BlockHelper.canPlaceAgainstAnyFace(level.getBlockState(pos));
     }
 
     /**
@@ -534,13 +603,27 @@ public final class MovementHelper {
     }
 
     /**
-     * 能否瞄准该方块侧面中心作为放置贴面:完整实心方块或玻璃。
-     * 技术上能贴、实际瞄不准的薄片方块(地毯之类)不算。
+     * 能否拿这一格当放置贴面(无坐标版:任何一个面可贴即算)。
+     *
+     * <p>唯一真源是 {@link BlockHelper#canPlaceAgainstAnyFace}:按<b>面</b>问
+     * {@code isFaceSturdy} 的形状判定。旧判据是"完整实心方块或玻璃",把下半台阶的底面、
+     * 楼梯的背面、灵魂沙的顶面这些<b>真能贴</b>的表面一并判死了 —— 于是执行器明明引得
+     * 出那条射线,规划期却说"这儿放不了",两边对同一个动作各执一词。
+     *
+     * <p>箱/地毯这类"侧面不是齐平面"的方块仍然是 false:它们的碰撞盒缩在格子里,
+     * 瞄侧面中心的射线打不到齐平面。这不是白名单式的保守,而是形状本身的结论。
      */
     public static boolean canPlaceAgainst(BlockState state) {
-        return isBlockNormalCube(state)
-                || state.getBlock() == Blocks.GLASS
-                || state.getBlock() instanceof StainedGlassBlock;
+        return BlockHelper.canPlaceAgainstAnyFace(state);
+    }
+
+    /**
+     * 按<b>具体哪一面</b>判:执行器已经知道要贴的是哪个面(它就是从 {@code placeAt}
+     * 往那个方向找到 {@code against} 的),就该问那一面,而不是问整块方块。
+     * 同一形状判据,见 {@link BlockHelper#canPlaceAgainst(BlockGetter, BlockPos, Direction)}。
+     */
+    public static boolean canPlaceAgainst(BlockGetter level, BlockPos pos, Direction face) {
+        return BlockHelper.canPlaceAgainst(level, pos, face);
     }
 
     // ==================== 门 / 栅栏门通行 ====================

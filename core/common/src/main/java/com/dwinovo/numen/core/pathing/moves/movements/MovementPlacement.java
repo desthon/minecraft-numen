@@ -51,9 +51,29 @@ final class MovementPlacement {
         NO_OPTION
     }
 
-    /** 放置贴面枚举顺序:四个水平向在前,DOWN 最后(不含 UP)。 */
+    /**
+     * 规划期的贴面枚举:四个水平向在前,DOWN 最后(不含 UP)。
+     *
+     * <p>移动原语的成本函数按 {@code i < 5} 引用它(Traverse/Ascend/Parkour),
+     * 所以这里的顺序与长度都<b>不许动</b>:改一下就是改规划口径。
+     */
     static final Direction[] HORIZONTALS_AND_DOWN = {
             Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.DOWN
+    };
+
+    /**
+     * 执行期的贴面枚举:既有五面 + 最后的 UP(贴着天花板也能放一块)。
+     *
+     * <p>为什么单独一份而不是往上面那个数组里塞一个 UP:上面那份被成本模型按
+     * {@code i < 5} 引用着,往末尾追加会把 DOWN 挤出那五个下标,规划期就再也不认
+     * "朝下贴面"了。执行期多出来的这一面只影响"她能不能真的把方块放出去",不改
+     * 规划期的判断 —— 顺序上 UP 排在 DOWN 之前,而 DOWN 的语义是"preferDown 时最后
+     * 一个可行胜出",所以垫柱(朝下放)照旧优先,UP 只是前五面全都没戏时的最后一次
+     * 尝试(头顶有天花板、脚下是坑)。
+     */
+    static final Direction[] PLACEMENT_FACES = {
+            Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST,
+            Direction.UP, Direction.DOWN
     };
 
     /** 潜行时的眼高(米)。 */
@@ -88,10 +108,11 @@ final class MovementPlacement {
     /**
      * 尝试对 placeAt 找一个可行的放置贴面:先试直视 placeAt 本体
      * (可替换方块自带轮廓时能命中,中心不可视回退到六面心),再按
-     * {@link #HORIZONTALS_AND_DOWN} 枚举五个贴面,要求贴面方块可贴、
-     * 且沿"这一 tick 头实际能转到哪"的射线命中该贴面且命中面的邻格
-     * 恰为 placeAt。preferDown=false 取第一个可行(水平优先),true 取
-     * 最后一个(DOWN 优先,空中放置不必歪头)。
+     * {@link #PLACEMENT_FACES} 枚举六个贴面(四个水平向、UP、DOWN),要求
+     * 贴面方块<b>那一面</b>可贴({@code isFaceSturdy}),且沿"这一 tick 头实际
+     * 能转到哪"的射线命中该贴面且命中面的邻格恰为 placeAt。
+     * preferDown=false 取第一个可行(水平优先),true 取最后一个
+     * (DOWN 优先,空中放置不必歪头)。
      *
      * <p>当前转角已命中正确目标 → READY_TO_PLACE(右键由调用方按);
      * 找到贴面但没对准 → ATTEMPTING;找不到 → NO_OPTION。
@@ -132,9 +153,12 @@ final class MovementPlacement {
             }
         }
 
-        for (int i = 0; i < 5; i++) {
-            BlockPos against = placeAt.relative(HORIZONTALS_AND_DOWN[i]);
-            if (!MovementHelper.canPlaceAgainst(level, against)) {
+        for (int i = 0; i < PLACEMENT_FACES.length; i++) {
+            Direction fromTarget = PLACEMENT_FACES[i];
+            BlockPos against = placeAt.relative(fromTarget);
+            // 问"against 上朝着 placeAt 的那一面"能不能贴 —— 这正是射线会打中的那一面。
+            // (变量名避开下面那个 Vec3 face —— 它是瞄点,这里问的是方向。)
+            if (!MovementHelper.canPlaceAgainst(level, against, fromTarget.getOpposite())) {
                 continue;
             }
             // 贴面中心:两格坐标的中点,落在共享面上
@@ -171,7 +195,7 @@ final class MovementPlacement {
         if (looking.getType() == HitResult.Type.BLOCK) {
             BlockPos selected = looking.getBlockPos();
             if (selected.equals(placeAt)
-                    || (MovementHelper.canPlaceAgainst(level, selected)
+                    || (MovementHelper.canPlaceAgainst(level, selected, looking.getDirection())
                             && selected.relative(looking.getDirection()).equals(placeAt))) {
                 if (wouldSneak) {
                     state.setInput(Input.SNEAK, true);

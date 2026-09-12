@@ -69,6 +69,20 @@ class GoalCompilerTest {
     }
 
     @Test
+    void mineFieldDropMemberIsReachableWithinOneBlock() {
+        // bug 1:掉落物成员曾经是 exact(drop) —— 要求脚位恰好落在物品实体那一格。
+        // 物品浮在台阶上、被水推了半格、或者她自己站在旁边一格,判据就永远不成立,
+        // 复合目标里那个成员白占一个位置。改成 1 格球邻域(与 LootSweep 收战利品同一条)。
+        BlockPos drop = T.north(2);
+        GoalCompiler.Compiled c = GoalCompiler.mineField(List.of(), List.of(drop));
+        assertTrue(c.goal().isAt(drop), "站在掉落物那一格算到达");
+        assertTrue(c.goal().isAt(drop.north()), "隔一格也算到达(拾取半径内)");
+        assertTrue(c.goal().isAt(drop.above()), "物品悬空时站在它下面也算到达");
+        assertFalse(c.goal().isAt(drop.north(2)), "两格开外不算到达 —— 那时还捡不到");
+        assertTrue(c.sacred().isEmpty(), "掉落物没有任何需要保护的目标格");
+    }
+
+    @Test
     void mineFieldOnlyAdmitsCellsWhoseBodyTouchesTheOre() {
         GoalCompiler.Compiled c = GoalCompiler.mineField(List.of(T), List.of());
         assertTrue(c.goal().isAt(T.below(2)), "脚在下两格:矿贴着头顶");

@@ -15,6 +15,7 @@ import com.dwinovo.numen.core.act.BlockDigger;
 import com.dwinovo.numen.core.pathing.execute.PlayerNav;
 import com.dwinovo.numen.core.pathing.util.BlockHelper;
 import com.dwinovo.numen.core.pathing.util.NavProfiler;
+import com.dwinovo.numen.core.scan.OwnerBuildMemory;
 import com.dwinovo.numen.core.scan.TargetIndex;
 import com.dwinovo.numen.core.task.base.AbstractCompanionTask;
 import com.dwinovo.numen.core.task.base.Precondition;
@@ -120,8 +121,12 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
 
     /** How long a just-broken target's cell stays a walk-over goal (ticks) — the drop
      *  takes a moment to spawn, and without this window the body sprints for the next
-     *  ore before the item pops and leaves it behind. */
-    private static final int DROP_LOITER_TICKS = 5;
+     *  ore before the item pops and leaves it behind.
+     *
+     *  <p>15 刻(0.75 s)而不是 5:掉落物要等服务端把物品实体推出来、再落地稳定下来,
+     *  而她挖穿那一刻往往已经在往下一颗矿走。5 刻在她的移动速度下走不到 1.5 格,
+     *  人已经出了拾取半径。 */
+    private static final int DROP_LOITER_TICKS = 15;
 
     private final List<BlockPos> knownOres = new ArrayList<>();
     /**
@@ -138,6 +143,8 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     /** Targets pruned because no carried tool harvests them (force=false only) — kept so the
      *  terminal failure can name the tool problem instead of reporting an empty field. */
     private final Set<BlockPos> unharvestable = new HashSet<>();
+    /** 被筛掉的目标格里有几格是玩家自己放的方块(见 {@code prune})——收尾回执点名用。 */
+    private final Set<BlockPos> ownerPlaced = new HashSet<>();
     /** Items the target blocks drop (simulated via the server loot tables). The
      *  count is over THESE in the inventory, not blocks broken — redstone_ore yields ~4 redstone. */
     private Set<Item> dropItems = Set.of();
@@ -238,12 +245,12 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 ? Math.max(0, inventoryMatch() - baseline)
                 : brokenTargets;
         r.setMined(gathered);
-        if (gathered >= r.count) {
-            progressNote = "gathered all requested";
-            return TaskState.SUCCESS;
-        }
-
         Level level = player.level();
+        if (gathered >= r.count) {
+            // 数量够了不等于收工:最后挖掉的那几块还在地上滚。先把它们捡干净再报成功 ——
+            // 主人看到的"gathered N/N"必须是背包里的 N,不是地上躺着的 N(见 finishUp)。
+            return finishUp();
+        }
 
         // Maintain the ore list every tick — INCLUDING while a dig below is latched:
         // prune (cheap — knownOres is capped at 64) revalidates against the live world;
@@ -418,6 +425,86 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         return TaskState.RUNNING;
     }
 
+    // ---- 收尾:数量够了,先把地上的掉落物捡干净 ----
+
+    /** 收尾已经烧掉的刻数(见 {@link #finishUp})。 */
+    private int leftoverTicks;
+    /** 放弃收尾时地上还剩几件(写进回执,不假装捡完了)。 */
+    private int leftoversAbandoned;
+    /**
+     * 收尾捡掉落物的时间上限(刻,10 秒)。<b>必须有限</b>:够不着的掉落物(掉进岩浆、
+     * 卡在墙缝、隔着一道她挖不动的墙)不能把一件<b>已经完成</b>的采集拖成超时 ——
+     * 数量口径是背包里的物品,已经够了就该如实报成功。
+     */
+    private static final int LEFTOVER_PICKUP_TICKS = 200;
+
+    /**
+     * 数量已经集齐之后的收尾:把这次挖出来的、还在地上的掉落物捡到手。
+     *
+     * <p>为什么必须做:进度口径是<b>背包里的</b>物品,而 {@code r.count} 一到,
+     * 旧代码立刻 SUCCESS —— 可最后挖掉的那一格往往刚刚破,掉落物还在原地滚,
+     * 她已经转身走向下一颗矿。主人收到"gathered 8/8",背包里只有 7 块。
+     *
+     * <p>收尾只朝掉落物走({@link #dropFieldCompiled}),<b>不再多挖一格目标</b>:
+     * 数量到了就是到了,不能借收尾之名继续扩大采集。
+     */
+    private TaskState finishUp() {
+        if (!finishing) {
+            finishing = true;
+            digger.cancel();   // 数量到了:手上这半格别再挖了
+            if (nav != null) {
+                stopNav();     // 换一条只认掉落物的目标
+            }
+        }
+        if (leftoverTicks >= LEFTOVER_PICKUP_TICKS) {
+            if (!drops.isEmpty()) {
+                leftoversAbandoned = drops.size();
+            }
+            progressNote = "gathered all requested" + (leftoversAbandoned > 0
+                    ? " (left " + leftoversAbandoned + " drop(s) I could not reach)" : "");
+            return TaskState.SUCCESS;
+        }
+        // 收尾不烧任务预算:tick 远快于真实时间时(/tick rate),这几十刻的收尾会
+        // 把一开始算好的期限吃光,任务在成功前一刻报 TIMEOUT。与冷图等待同一条保护。
+        r.extendDeadlineTo(r.getDeadlineGameTime() + 1);
+        // skipNearOre=false:她不再去挖任何矿了,"挖那颗矿顺路就捡了"这条理由不成立,
+        // 矿位旁边的掉落物必须自己去捡。
+        drops = droppedItems(false);
+        if (drops.isEmpty()) {
+            progressNote = "gathered all requested";
+            return TaskState.SUCCESS;
+        }
+        leftoverTicks++;
+        if (nav == null || navIsBranch) {
+            stopNav();
+            nav = PlayerNav.toRevalidating(player, this::dropFieldCompiled, MINE_SPEED,
+                    () -> drops.isEmpty(), PlayerNav.ContextProvider.TERRAFORM);
+            navIsBranch = false;
+        }
+        switch (nav.tick()) {
+            case ARRIVED -> {
+                nav.pause();
+                return TaskState.RUNNING;   // 走到跟前了,下一 tick 再判掉落物还在不在
+            }
+            case RUNNING -> { return TaskState.RUNNING; }
+            case FAILED -> {
+                // 走不到就如实收工:数量已经够了,不为几件掉落物把任务判死。
+                com.dwinovo.numen.core.Constants.LOG.info(
+                        "[numen-task] mine 收尾:掉落物走不到 ({}) | feet={} 剩 {} 件",
+                        nav.failType(), player.blockPosition().toShortString(), drops.size());
+                leftoversAbandoned = drops.size();
+                stopNav();
+                progressNote = "gathered all requested (left " + leftoversAbandoned
+                        + " drop(s) I could not reach)";
+                return TaskState.SUCCESS;
+            }
+        }
+        return TaskState.RUNNING;
+    }
+
+    /** 收尾已经开过(用于一次性取消手上的挖掘)。 */
+    private boolean finishing;
+
     // ---- goals ----
 
     /** The whole mining objective, compiled: a stance per ore + a walk-over member
@@ -430,6 +517,14 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         }
         return GoalCompiler.mineField(
                 new ArrayList<>(knownOres), new ArrayList<>(drops));
+    }
+
+    /** 收尾阶段的目标:只有掉落物,没有矿位 —— 数量已经够了,不再多挖一格目标。 */
+    private GoalCompiler.Compiled dropFieldCompiled() {
+        if (drops.isEmpty()) {
+            return GoalCompiler.standOn(player.blockPosition());
+        }
+        return GoalCompiler.mineField(List.of(), new ArrayList<>(drops));
     }
 
 
@@ -450,8 +545,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         return r.targets.contains(state.getBlock()) && plausibleToBreak(ctx, pos, state);
     }
 
-    /** 该目标格是否真挖得成:挖穿成本无穷(挖不动/被硬禁)、禁挖判定命中
-     *  (冰/虫蚀/贴液体/悬空落沙邻格/世界边界)、或上下都被基岩封死的都不算。
+    /** 该目标格是否真挖得成:挖穿成本无穷(挖不动/被硬禁/主人自己放的)、禁挖判定命中
+     *  (虫蚀、贴岩浆或悬空落沙、世界边界 —— 贴水的格子现在只是贵,不再禁)、
+     *  或上下都被基岩封死的都不算。
      *  包内共享:goto 的 FIND 候选入册走同一道剪枝。 */
     public static boolean plausibleToBreak(CalculationContext ctx, BlockPos pos, BlockState state) {
         if (MovementHelper.getMiningDurationTicks(ctx, pos.getX(), pos.getY(), pos.getZ(),
@@ -467,12 +563,64 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                         == net.minecraft.world.level.block.Blocks.BEDROCK);
     }
 
+    // ---- 纯判据(抽出来所以能无头单测:只吃坐标,不碰世界) ----
+
+    /**
+     * 脚位到目标够不够近,近到可以<b>原地</b>挖(不挪窝)。判的是<b>水平</b>距离(>1.5 格就不算)。
+     *
+     * <p>为什么是水平而不是三维距离:挖掉的方块在原地生成掉落物,而拾取是水平 1 格半径内
+     * 的事——她站在两格外隔空把矿打掉,东西就留在两格外的地上,转身走了。垂直方向不必管:
+     * 掉落物有重力,头顶的矿打掉自己会掉到脚边。
+     *
+     * <p>为什么阈值恰好压在"贴着"上:站立目标 {@code NavGoal.mineStance} 收的正是
+     * {@code dx+dz<=1}(身体贴着它)的格子。判据一旦比它松,就会出现"站在这批目标给得出的
+     * 某个站位上、就地挖掘却说自己够不着"的死循环——导航说到了,挖掘说不挖,重规划再到同一个
+     * 地方。所以这条线不许越过 mineStance 的边界(1.5 格只多收一个对角)。
+     */
+    public static boolean closeEnoughToMineInPlace(BlockPos feet, BlockPos target) {
+        double dx = feet.getX() - target.getX();
+        double dz = feet.getZ() - target.getZ();
+        return dx * dx + dz * dz <= IN_PLACE_MAX_XZ_SQR;
+    }
+
+    /** {@link #closeEnoughToMineInPlace} 的阈值平方(1.5 格:紧邻与对角)。 */
+    private static final double IN_PLACE_MAX_XZ_SQR = 1.5 * 1.5;
+
+    /**
+     * 掉落物是否被某个已知矿位"顺路覆盖"——同格或紧邻(距离平方 ≤ 1)。
+     *
+     * <p>只覆盖到这一档:挖那颗矿时身体必然贴着它站(见 {@link NavGoal#mineStance}),
+     * 掉落物就在伸手可拾的半径里,不必再为它单列一个目标。原阈值是 3 格(平方 9),
+     * 于是<b>三格内只要有矿</b>,旁边刚挖出来的东西就全被过滤掉——而她未必会去挖那颗矿
+     * (它可能被墙包着、或者根本不在这次的目标里),掉落物就永远没人捡。
+     */
+    public static boolean dropCoveredByKnownOre(BlockPos drop, List<BlockPos> knownOres) {
+        for (BlockPos ore : knownOres) {
+            if (ore.distSqr(drop) <= DROP_COVERED_SQR) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** {@link #dropCoveredByKnownOre} 的阈值平方(1 格:同格或紧邻)。 */
+    private static final double DROP_COVERED_SQR = 1.0;
+
     /** Dropped items worth collecting, walked over for native pickup: only items the
      *  targets actually drop (a stray rotten flesh isn't this task's business), within
      *  the task's own working radius. A drop sitting next to a known ore is skipped —
      *  mining that ore walks us there anyway. Just-broken cells linger as members for
      *  {@link #DROP_LOITER_TICKS} so the spawning drop isn't left behind. */
     private List<BlockPos> droppedItems() {
+        return droppedItems(true);
+    }
+
+    /**
+     * @param skipNearOre 矿位旁边的掉落物要不要跳过 —— 还在挖时跳过(挖那颗矿自然会带身体过去,
+     *                    见 {@link #dropCoveredByKnownOre});收尾阶段不能跳:她不会再去挖了,
+     *                    跳过就等于把这些掉落物永远留给世界。
+     */
+    private List<BlockPos> droppedItems(boolean skipNearOre) {
         Level level = player.level();
         long now = level.getGameTime();
         anticipatedDrops.values().removeIf(expiry -> expiry < now);
@@ -487,19 +635,14 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         for (ItemEntity ie : level.getEntitiesOfClass(ItemEntity.class, box)) {
             if (!dropItems.contains(ie.getItem().getItem())) continue;
             BlockPos p = ie.blockPosition();
-            if (nearKnownOre(p)) continue;
+            if (skipNearOre && dropCoveredByKnownOre(p, knownOres)) continue;
             out.add(p);
         }
         for (BlockPos p : anticipatedDrops.keySet()) {
-            if (nearKnownOre(p)) continue;
+            if (skipNearOre && dropCoveredByKnownOre(p, knownOres)) continue;
             out.add(p);
         }
         return out;
-    }
-
-    /** 距任一已知矿位 3 格内(distSqr ≤ 9)——挖那颗矿自然会带身体过去。 */
-    private boolean nearKnownOre(BlockPos p) {
-        return knownOres.stream().anyMatch(ore -> ore.distSqr(p) <= 9);
     }
 
     /**
@@ -514,9 +657,12 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      * The in-place mining pick: the nearest known target the eyes can ACTUALLY hit from where the body
      * stands right now ({@link #reachable}: centre + exposed face points, within block reach, nothing
      * solid in the way) — mined on the spot, no pathing. Column and height don't matter; hittability
-     * does. The one hard exception is the support cell directly under the feet — never dig out our own
-     * floor. Anything the eyes can't hit from here is left to the navigator (walk to a stance, pillar
-     * up, etc.).
+     * does — plus one distance gate, {@link #closeEnoughToMineInPlace}: a block two or more blocks
+     * away horizontally is NOT mined from here, because its drop would land out of pickup range and
+     * be left behind. Those targets are the composite goal's business (it walks the body up to
+     * them). The one hard exception is the support cell directly under the feet — never dig out our
+     * own floor. Anything the eyes can't hit from here is left to the navigator (walk to a stance,
+     * pillar up, etc.).
      */
     private BlockPos reachableTarget() {
         if (!player.onGround()) return null;
@@ -530,6 +676,12 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 break;   // sorted nearest-first — everything after this is farther still
             }
             if (ore.equals(support) || level.getBlockState(ore).isAir()) {
+                continue;
+            }
+            // 站得太远就别隔空打:打掉的方块在原地生成掉落物,而拾取只在水平 1 格内发生 ——
+            // 隔三格把矿打掉,东西就留在三格外的地上,她转身去找下一颗。交给复合目标把身体贴上去
+            // (站立目标 mineStance 收的正是"贴着"那一档,所以这条闸不会和它打架)。
+            if (!closeEnoughToMineInPlace(feet, ore)) {
                 continue;
             }
             double d = ore.distSqr(feet.above());
@@ -762,8 +914,17 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 com.dwinovo.numen.core.pathing.moves.TerrainPermit.TERRAFORM);
         knownOres.removeIf(p -> {
             var state = level.getBlockState(p);
-            if (state.isAir() || !r.targets.contains(state.getBlock()) || unworkable.contains(p)
-                    || !plausibleToBreak(ctx, p, state)) {
+            if (state.isAir() || !r.targets.contains(state.getBlock()) || unworkable.contains(p)) {
+                return true;
+            }
+            // 玩家(bug 14:主人自己)放上去的方块不进名单:她要挖的是矿,不是主人的建材 ——
+            // 名字碰巧对上(她刚用石头砌了墙,而任务要石头)也不挖。记一笔,好在终局回执里
+            // 如实说"有几颗目标是你自己放的",而不是含糊地报"附近没有"。
+            if (OwnerBuildMemory.isProtected(level, p)) {
+                ownerPlaced.add(p.immutable());
+                return true;
+            }
+            if (!plausibleToBreak(ctx, p, state)) {
                 return true;
             }
             // Harvestability gate. Tool-skipped cells are remembered so the terminal failure
@@ -858,6 +1019,21 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *  ({@code NO_PATH} — 没有任何站位能对它拉出射线), with the counts.
      *  「走不到」那一档不在这里 —— 它由 {@link #stalledOut} 收工。 */
     private TaskState noOreFailure() {
+        if (!ownerPlaced.isEmpty()) {
+            // 这一批目标格是她(玩家)自己放的方块。不是我挖不动,是我<b>不挖</b> —— 挖矿任务
+            // 的目标是矿,不是主人的建筑,而名字碰巧对上时(她要的正是石头/木板)分不出来,
+            // 所以按"不碰玩家放过的地方"处理。
+            //
+            // 逃生口必须写清:这不是"永远无路可走"。真要拆,把话说明白再拆 ——
+            // break_block 是她手把手指定的一格(那是显式授权),或者先去问主人。
+            fail("found " + ownerPlaced.size() + " " + r.label + " nearby but they are blocks a"
+                    + " player placed by hand — I don't mine the owner's own build while gathering,"
+                    + " even when the block name matches my target; gathered " + r.getMined()
+                    + " so far. If removing them is really wanted, break those exact blocks with"
+                    + " break_block (ask the owner first), or point me at a natural deposit and I'll"
+                    + " continue.", FailureType.TERRAIN_BLOCKED);
+            return TaskState.FAILED;
+        }
         if (!unharvestable.isEmpty()) {
             // Targets exist but the carried tools can't make them drop — the actionable
             // problem is the tool, not the deposit. Names the escape hatches explicitly.

@@ -5,10 +5,12 @@ import java.util.List;
 
 import com.dwinovo.numen.core.pathing.settings.NavSettings;
 import com.dwinovo.numen.core.pathing.util.BlockHelper;
+import com.dwinovo.numen.core.scan.OwnerBuildMemory;
 
 import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.longs.LongSets;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
@@ -79,6 +81,8 @@ public class CalculationContext {
     /** 水中行走单格成本(水下速附魔按系数折向平走速度)。 */
     public final double waterWalkSpeed;
     public final double breakBlockAdditionalCost;
+    /** 邻格水的挖掘成本乘数(构造时取样,同一次搜索里一把尺,见 NavSettings 同名项)。 */
+    public final double waterAdjacentBreakMultiplier;
     public double backtrackCostFavoringCoefficient;
     public double jumpPenalty;
     public final double walkOnWaterOnePenalty;
@@ -102,11 +106,21 @@ public class CalculationContext {
      */
     public final WorldBorder worldBorder;
 
+    /**
+     * 本维度键(构造时在主线程取样,可为 null:测试壳玩家没有 level)。
+     *
+     * <p>为什么是 final 字段而不是每次现问:成本计算会跑在 worker 线程上,
+     * 而线程审计的结论是这条路径不得解引用玩家/活世界。维度是"世界身份"的一部分,
+     * 与背包/附魔同属构造期取样,冻结下来才安全。它唯一的用途是查
+     * {@link OwnerBuildMemory}(玩家自己放过的方块不可挖)。
+     */
+    public final ResourceKey<Level> dimension;
+
     /** 便捷构造:无目标格/禁放格开关,只带许可。 */
     public CalculationContext(ServerPlayer player, BlockGetter view, ChunkLoadedTest loadedTest,
                               boolean safeForThreadedUse, TerrainPermit permit) {
         this(player, view, loadedTest, safeForThreadedUse,
-                LongSets.emptySet(), LongSets.emptySet(), permit);
+                LongSets.EMPTY_SET, LongSets.EMPTY_SET, permit);
     }
 
     public CalculationContext(ServerPlayer player, BlockGetter view, ChunkLoadedTest loadedTest,
@@ -158,6 +172,7 @@ public class CalculationContext {
         this.fallDamageCostPerPoint = settings.fallDamageCostPerPoint;
         this.waterWalkSpeed = computeWaterWalkSpeed(player);
         this.breakBlockAdditionalCost = settings.blockBreakAdditionalPenalty;
+        this.waterAdjacentBreakMultiplier = Math.max(1.0, settings.waterAdjacentBreakPenaltyMultiplier);
         this.backtrackCostFavoringCoefficient = settings.backtrackCostFavoringCoefficient;
         this.jumpPenalty = settings.jumpPenalty;
         this.walkOnWaterOnePenalty = settings.walkOnWaterOnePenalty;
@@ -166,14 +181,18 @@ public class CalculationContext {
         this.worldBottom = view.getMinBuildHeight();
         this.worldHeight = view.getMaxBuildHeight();
         WorldBorder border = null;
+        ResourceKey<Level> dim = null;
         if (player != null) {
             try {
-                border = player.level() != null ? player.level().getWorldBorder() : null;
+                Level level = player.level();
+                border = level != null ? level.getWorldBorder() : null;
+                dim = level != null ? level.dimension() : null;
             } catch (NullPointerException ignored) {
-                // 测试壳玩家无 level 字段:无世界边界,按"不限制"处理
+                // 测试壳玩家无 level 字段:无世界边界、无维度(玩家放置保护自然不生效)
             }
         }
         this.worldBorder = border;
+        this.dimension = dim;
     }
 
     /**
@@ -296,13 +315,22 @@ public class CalculationContext {
     private final BlockPos.MutableBlockPos protectionCursor = new BlockPos.MutableBlockPos();
 
     /**
-     * 挖 (x,y,z) 的成本乘数。两层禁令,从严到宽:
+     * 挖 (x,y,z) 的成本乘数。三层禁令,从严到宽:
      * <ol>
      *   <li>sacred(自身目标格)永远 INF,任何开关都不可穿透;</li>
      *   <li>do_not_break 标签成员(默认设施类:床/门/活板门/栅栏门,
      *       数据包可追加)直接 INF,任何开关都不可解除;</li>
+     *   <li>玩家自己放过的方块({@link OwnerBuildMemory})直接 INF —— 绕路,不拆家。
+     *       这一层管的是"名字看着像天然方块、其实是她/主人砌的墙":挖矿任务按方块
+     *       种类下目标,石头/木板/圆石在主人家里和地下长得一模一样,只有在放置那一刻
+     *       记下的账能分开它们;</li>
      *   <li>许可为 PRESERVE、或总开关 {@code allowBreak} 关闭,且不在例外清单 → INF。</li>
      * </ol>
+     *
+     * <p><b>逃生口</b>:INF 不等于"永远到不了"。找不到不动地形的路时,导航层会探一条
+     * 可改地形的路并把要动的方块列成清单({@code TerrainBill})交回来
+     * ({@code FailureType.TERRAIN_BLOCKED}),模型据此决定要不要授权。这里不做例外开关 ——
+     * "这一格算不算主人的建筑"是判断,归模型,不归引擎(引擎只负责如实记账)。
      * 功能方块(工作台/熔炉/箱子等)的 ×10 软惩罚由 {@link ToolSet}
      * 的 {@code avoidanceMultiplier}(NavSettings.blocksToAvoidBreaking)
      * 在 {@code getStrVsBlock} 里实现,此处不参与。
@@ -312,6 +340,9 @@ public class CalculationContext {
             return COST_INF;
         }
         if (BlockHelper.shouldAvoidBreaking(view, protectionCursor.set(x, y, z))) {
+            return COST_INF;
+        }
+        if (OwnerBuildMemory.isProtected(dimension, protectionCursor)) {
             return COST_INF;
         }
         if (!allowBreak && !allowBreakAnyway.contains(current.getBlock())) {
