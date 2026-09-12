@@ -1,6 +1,7 @@
 package com.dwinovo.numen.core.task.chain;
 
 import com.dwinovo.numen.core.combat.Menace;
+import com.dwinovo.numen.core.combat.ShieldPlan;
 import com.dwinovo.numen.core.task.combat.AttackCompanionTask;
 import com.dwinovo.numen.core.task.combat.AttackTaskRecord;
 import com.dwinovo.numen.core.task.survival.SurvivalDecisions;
@@ -12,6 +13,7 @@ import com.dwinovo.numen.task.reflex.Reflex;
 
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.monster.Creeper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -35,8 +37,17 @@ import java.util.List;
  *
  * <h2>什么算危险</h2>
  * 看的是<b>它已经逼到多近</b>:还远就有时间(模型看得见它,该由模型决定),近了就没有提前量,
- * 当场接管。这条线按威胁类型取自 {@link Menace}——爬行者 7.5(引信开始倒退的距离)、
- * 末影水晶 12(爆炸威力的两倍)、寻常怪 {@link #MELEE_DANGER}。
+ * 当场接管。这条线按威胁类型取自 {@link Menace}:
+ *
+ * <ul>
+ *   <li>爬行者 {@link Menace#CREEPER_INTERVENTION}(6)—— 点火线 3 加三格提前量。
+ *       它的危险半径(3.71)落在点火区里,拿它当接管线等于"点着了才反应",而引信只剩 30 刻;</li>
+ *   <li>末影水晶 {@code Menace.dangerRadius}(12.71)—— 爆炸威力的两倍,它一打就炸;</li>
+ *   <li>寻常怪 {@link #MELEE_DANGER}(4)—— 它再走一步就够得着,本条链子唯一不是从原版推出来的数。</li>
+ * </ul>
+ *
+ * <p><b>来袭的弹射物也算危险</b>:骷髅射出的箭不是一只 Mob,扫怪扫不到它,而它正是她
+ * 最容易站着不动挨的那一下。
  */
 public final class MobDefenseChain implements Task, Reflex {
 
@@ -49,8 +60,12 @@ public final class MobDefenseChain implements Task, Reflex {
     /**
      * 寻常近战怪逼到这么近就算危险。
      *
-     * <p>爬行者与末影水晶那两条线是从原版推出来的(引信倒退距离、爆炸威力两倍),这一条不是
-     * ——它是"它下一步就能打到我"的经验值。要更硬该去读每种怪自己的攻击距离。
+     * <p>爬行者(点火线加提前量)与末影水晶(爆炸威力两倍)那两条线是从原版推出来的,这一条不是
+     * ——它是"它下一步就能打到我"的经验值,要比 {@link Menace#dangerRadius} 的裸值宽一点:
+     * 僵尸 2.73、蜘蛛 2.59 都只是"它已经够得着我",而接管要的是那<b>一步之前</b>。
+     *
+     * <p>它曾经是个死常量:链子实际比的是 {@code Menace.tooClose}(危险半径),这个数一次都没
+     * 被读过。现在它是 {@link #takeoverLine} 的下限。
      */
     private static final double MELEE_DANGER = 4.0;
 
@@ -91,7 +106,7 @@ public final class MobDefenseChain implements Task, Reflex {
         if (fight != null) {
             return true;   // 打着呢,打完再说
         }
-        if (SurvivalDecisions.mobDefenseTriggered(!dangersNear(companion).isEmpty())) {
+        if (SurvivalDecisions.mobDefenseTriggered(dangerPresent(companion))) {
             return true;
         }
         // 宽限期内不撒手:怪刚出半径不代表没事了,这一刻放手下一刻就得重来。
@@ -100,11 +115,11 @@ public final class MobDefenseChain implements Task, Reflex {
 
     @Override
     public TaskState tick(NumenPlayer companion) {
-        if (!dangersNear(companion).isEmpty()) {
+        if (dangerPresent(companion)) {
             dangerLastSeenTick = companion.level().getGameTime();
         }
         if (fight == null) {
-            if (dangersNear(companion).isEmpty()) {
+            if (!dangerPresent(companion)) {
                 return TaskState.RUNNING;   // 宽限期里的空转,别开新的一场
             }
             begin(companion);
@@ -129,8 +144,9 @@ public final class MobDefenseChain implements Task, Reflex {
                 "reflex-" + now, now + NO_DEADLINE, List.of(), true);
         fight = new AttackCompanionTask(companion, record);
         fight.start(companion);
-        com.dwinovo.numen.Constants.LOG.info("[numen-defense] 自动接管 —— 身边 {} 个危险",
-                dangersNear(companion).size());
+        com.dwinovo.numen.Constants.LOG.info("[numen-defense] 自动接管 —— 身边 {} 个危险,{} 发来袭弹",
+                dangersNear(companion).size(),
+                Menace.incomingThreats(companion, SCAN_RADIUS).size());
     }
 
     /** 长到等同于没有截止时间;终点由"没人再追我"说了算。 */
@@ -142,6 +158,9 @@ public final class MobDefenseChain implements Task, Reflex {
         dangerLastSeenTick = NEVER;
         InputDriver.halt(companion);
         companion.setShiftKeyDown(false);
+        // 收场时把还举着的盾放下:它是 useItem,链子交还身体之后没人再管它,而她带着一面
+        // 举起的盾去做下一件事——减速,而且下一个要用 useItem 的动作全变成空操作。
+        ShieldPlan.lowerShield(companion);
         com.dwinovo.numen.Constants.LOG.info("[numen-defense] 收场 {} —— {}", state, line);
         // <b>不急</b>:她的后台任务照跑,黄了自有 task_finished 报。这条只是让主人翻聊天流时
         // 看得懂她刚才为什么打了一架、或者挪了二十格。攒着搭下一轮的车就够。
@@ -194,13 +213,46 @@ public final class MobDefenseChain implements Task, Reflex {
             if (m != attacker && m.getTarget() != companion) {
                 continue;
             }
-
-            // "够危险了没有"与站位、退避问的是<b>同一个函数</b>:它自己的危险半径。
-            // 用一条固定的线时每种怪都判错——爬行者要七格,僵尸两格就够。
-            if (Menace.tooClose(m, companion)) {
+            // <b>它到底会不会打她</b>由 {@link Menace#provoked} 那个纯函数说了算。
+            // 战斗层此前缺的就是这一条:寻路层早就有"未激怒的僵尸猪灵/末影人"的豁免,
+            // 而链子只要看见 {@code Enemy} 就开仗,于是路过的猪灵、僵尸猪灵一律挨打。
+            if (!Menace.threatens(m, companion)) {
+                continue;
+            }
+            if (companion.distanceTo(m) <= takeoverLine(m, companion)) {
                 near.add(m);
             }
         }
         return near;
+    }
+
+    /**
+     * 这一刻有没有危险:<b>逼到接管线的怪</b>,或者<b>会落到她身上的弹射物</b>。
+     *
+     * <p>后者扫的是箭不是 Mob —— 骷髅在射程里放箭时身边一只"危险生物"都没有,而她已经
+     * 站在弹道上了。
+     */
+    private boolean dangerPresent(NumenPlayer companion) {
+        return !dangersNear(companion).isEmpty()
+                || !Menace.incomingThreats(companion, SCAN_RADIUS).isEmpty();
+    }
+
+    /**
+     * 这一只逼到多近就接管 —— <b>"够危险了没有"与站位、退避问的是同一个函数</b>
+     * ({@link Menace#dangerRadius},从它自己的碰撞箱推),再按威胁类型补提前量。
+     *
+     * <p>用一条固定的线时每种怪都判错:爬行者要六格,僵尸两步就够。而直接用危险半径又
+     * 完全没提前量 —— 那是"它已经打到我了"的距离。
+     */
+    private double takeoverLine(Mob m, NumenPlayer companion) {
+        if (m instanceof Creeper) {
+            // 点火线 3 加三格提前量。它的危险半径(3.71)落在点火区里,拿它当接管线就是
+            // "点着了才反应",而引信点着到爆炸只有 30 刻。
+            return Math.max(Menace.CREEPER_INTERVENTION, Menace.dangerRadius(m, companion));
+        }
+        if (Menace.explodes(m)) {
+            return Menace.dangerRadius(m, companion);   // 末影水晶 12.71,本来就够远
+        }
+        return Math.max(MELEE_DANGER, Menace.dangerRadius(m, companion));
     }
 }

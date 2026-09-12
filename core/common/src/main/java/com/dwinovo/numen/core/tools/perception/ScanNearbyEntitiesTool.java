@@ -32,18 +32,23 @@ public final class ScanNearbyEntitiesTool implements NumenTool {
     @Override
     public String description() {
         return "List entities within a radius around you, sorted by distance. Use type_filter to "
-                + "narrow: 'hostile' for monsters, 'passive' for animals/items, 'player' for players, "
-                + "'all' for everything. Returns at most 20 entities; truncated:true means more exist. "
-                + "Each entry has id, type, position, distance, hp, and category. Pass "
-                + "the returned runtime ids to attack; it cannot attack anything outside that set.";
+                + "narrow: 'hostile' for things that attack you on sight, 'neutral' for mobs that "
+                + "only fight back (zombified piglins, endermen, wolves, iron golems — and piglins "
+                + "while you wear gold armour), 'passive' for animals/items, 'player' for players, "
+                + "'all' for everything. Returns at most 20 entities; truncated:true means more "
+                + "exist. Each entry has id, type, position, distance, hp, and category. Pass "
+                + "the returned runtime ids to attack; it cannot attack anything outside that set. "
+                + "'neutral' is not 'harmless': attacking one makes it hostile, and a piglin you "
+                + "did not provoke is worth more alive — wear gold and use interact with a gold "
+                + "ingot to barter instead of attacking it.";
     }
 
     @Override
     public Map<String, Object> parameterSchema() {
         return Schema.object()
                 .number("radius", "Search radius in blocks. Range [1, 64].", 1, 64)
-                .enumStr("type_filter", "One of: hostile, passive, player, all.",
-                        "hostile", "passive", "player", "all")
+                .enumStr("type_filter", "One of: hostile, neutral, passive, player, all.",
+                        "hostile", "neutral", "passive", "player", "all")
                 .build();
     }
 

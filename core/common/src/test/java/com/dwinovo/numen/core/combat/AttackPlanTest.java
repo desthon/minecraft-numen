@@ -124,21 +124,37 @@ class AttackPlanTest {
     }
 
     /**
-     * <b>引信没点着的爬行者就是一只普通怪。</b>她够得着 4 格、它 3 格才点火,中间那条一格宽
-     * 的带能打到它而不触发。曾经"会炸的一律不当目标",于是她只会绕着走、永远解决不掉。
+     * <b>会炸的东西,没弓就不占坑 —— 引信没点着的也一样。</b>
+     *
+     * <p>曾经这里放行未点火的爬行者:"她够得着 4 格(3.30)、它 3 格才点火,中间那条带能打到
+     * 它而不触发"。那条带只有 <b>0.3 格</b>,比格量化误差 {@code CELL_SLACK}(0.71)还窄:
+     * 判据说"这一格能打",寻路按格心算出来的落脚点却已经在点火区里 —— 实测她站在点火区里
+     * 挥刀,引信在脚下走完。
+     *
+     * <p>不当目标不等于不管它:它仍然算"还有东西在追她",走位照旧(对她来说那正是躲开它)。
      */
     @Test
-    void aCreeperThatHasNotLitYetIsJustAMob() {
+    void anUnlitCreeperWithoutABowIsNotWorthAttacking() {
         Move m = AttackPlan.decide(field(true, false, idleCreeper(1, 3.5)), null);
         assertEquals(Action.SKIRMISH, m.action());
+        assertEquals(AttackPlan.NO_FOE, m.foeId(), "没弓就不当目标,躲它归走位那一档");
+    }
+
+    /** 有弓才打它,而且是远远地射 —— 走位环的内沿已经顶到点火线之外。 */
+    @Test
+    void anUnlitCreeperWithABowIsShotFromOutside() {
+        Move m = AttackPlan.decide(field(true, true, idleCreeper(1, 3.5)), null);
+        assertEquals(Action.BOW, m.action());
         assertEquals(1, m.foeId());
     }
 
-    /** 远一点就走过去 —— 和别的怪没有区别。 */
+    /** 远近都一样:没弓的爬行者(不管点没点火)都不占坑,她只走位。 */
     @Test
-    void anUnlitCreeperIsWalkedUpToLikeAnythingElse() {
-        assertEquals(Action.SKIRMISH,
-                AttackPlan.decide(field(true, false, idleCreeper(1, 9.0)), null).action());
+    void anUnlitCreeperStaysUntargetedAtAnyDistanceWithoutABow() {
+        assertEquals(AttackPlan.NO_FOE,
+                AttackPlan.decide(field(true, false, idleCreeper(1, 9.0)), null).foeId());
+        assertEquals(AttackPlan.NO_FOE,
+                AttackPlan.decide(field(true, false, idleCreeper(1, 3.5)), null).foeId());
     }
 
     // ==================== 打谁:先近的,但要有承诺 ====================

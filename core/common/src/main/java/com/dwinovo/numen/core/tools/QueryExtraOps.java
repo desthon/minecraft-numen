@@ -1,6 +1,7 @@
 package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.agent.tool.ToolArgs;
+import com.dwinovo.numen.core.combat.Menace;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.platform.Services;
 import com.dwinovo.numen.task.TaskResult;
@@ -11,7 +12,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -52,14 +53,14 @@ String type_filter,
             NumenPlayer self) {
         radius = Mth.clamp(radius, MIN_RADIUS, MAX_RADIUS);
         String filter = readEnum("type_filter", type_filter,
-                List.of("hostile", "passive", "player", "all"));
+                List.of("hostile", "neutral", "passive", "player", "all"));
 
         AABB box = self.getBoundingBox().inflate(radius);
         List<Entity> raw = self.level().getEntities(self, box);
 
         List<ScoredEntity> matched = new ArrayList<>(raw.size());
         for (Entity e : raw) {
-            String cat = categorise(e);
+            String cat = categorise(e, self);
             if (!matches(filter, cat)) continue;
             matched.add(new ScoredEntity(e, cat, self.distanceTo(e)));
         }
@@ -95,9 +96,22 @@ String type_filter,
         return root.toString();
     }
 
-    private static String categorise(Entity e) {
+    /**
+     * 三档,不是两档。
+     *
+     * <p>原来的第二档判的是 {@code Monster},于是<b>猪灵</b>({@code extends Monster implements
+     * Enemy})被标成 hostile,模型据此直接 attack —— 而它只在她<b>没戴金甲</b>时才动手,戴着金甲
+     * 它当她不存在(原版 {@code PiglinAi.isWearingGold});僵尸猪灵更要她先砍那一刀才会还手。
+     * 反过来,史莱姆、岩浆怪、恶魂那些 {@code Enemy} 又根本不是 {@code Monster},一直被标成
+     * passive。
+     *
+     * <p>判据与战斗层同一个({@link Menace#unprovokedNeutral}):工具说中立,链子也真的不会
+     * 开仗 —— 两边各判各的,就会出现"扫出来是中立、她照样冲上去"。
+     */
+    private static String categorise(Entity e, NumenPlayer self) {
         if (e instanceof Player) return "player";
-        if (e instanceof Monster) return "hostile";
+        if (Menace.unprovokedNeutral(e, self)) return "neutral";
+        if (e instanceof Enemy) return "hostile";
         return "passive";
     }
 

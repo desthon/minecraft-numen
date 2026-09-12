@@ -8,6 +8,7 @@ import com.dwinovo.numen.core.combat.Battlefield;
 import com.dwinovo.numen.core.combat.Loadout;
 import com.dwinovo.numen.core.combat.Haven;
 import com.dwinovo.numen.core.combat.Menace;
+import com.dwinovo.numen.core.combat.ShieldPlan;
 import com.dwinovo.numen.core.combat.Swing;
 import com.dwinovo.numen.core.pathing.calc.NavGoal;
 import com.dwinovo.numen.core.pathing.goals.GoalAvoidEntities;
@@ -129,6 +130,15 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     private List<Mob> hostiles = List.of();
 
     /**
+     * 这一刻会落到她身上的<b>来袭弹射物</b>(预测落点),同样一刻只扫一次。
+     *
+     * <p>它和 {@link #hostiles} 并列,是因为它<b>不是一只 Mob</b>:骷髅射出的箭在她眼里原本
+     * 根本不存在 —— 危险半径只扫 Mob,寻路只躲生物,于是她一边走位一边撞进弹道里。
+     * 走位(落点进势场)与盾(有箭来就举)都读这一份。
+     */
+    private List<GoalAvoidEntities.Threat> incomingField = List.of();
+
+    /**
      * 上一次搜索<b>搜不出路</b>的目标。够不着是拓扑性质,不是距离性质 —— 悬崖对面三格的
      * 骷髅离得很近却没有路,所以只有寻路自己说得清。
      *
@@ -239,6 +249,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      */
     private Battlefield surveyField() {
         hostiles = Menace.hostilesAround(player, FIELD_RADIUS);
+        incomingField = Menace.incomingField(player, FIELD_RADIUS);
         List<Battlefield.Foe> foes = new ArrayList<>();
         for (var mob : hostiles) {
             boolean engaging = mob.getTarget() == player || mob == player.getLastHurtByMob();
@@ -349,6 +360,9 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     private TaskState finish() {
         InputDriver.halt(player);
         stopNav();
+        // 收场把举着的盾放下:它是 useItem,不放会一直减速,并且让下一个要用手的动作
+        // (吃东西、拉弓)全部变成空操作。
+        ShieldPlan.lowerShield(player);
         if (r.indiscriminate || !r.defeated().isEmpty()) {
             succeed();
             return TaskState.SUCCESS;
@@ -380,47 +394,64 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     /**
      * 盾。与攻击、寻路并列的<b>第三层</b>,同样每刻问一次,同样不管别人在干嘛。
      *
-     * <pre>
-     * 弓战斗中                       → 不碰(拉弓和举盾抢同一个 useItem,原版硬约束)
-     * 有谁进了它的危险半径 且 盾能举 → 举
-     * 否则                           → 放
-     * </pre>
+     * <p>判据全部在 {@link ShieldPlan#decide} 里(纯布尔真值表,能单测),这里只做三件事:
+     * 从身上读出那六个输入、按决定动手、以及"要腾手"时<b>先放盾再谈弓</b>。
+     *
+     * <p><b>触发条件是远程威胁,不再是"谁贴到我身上了"。</b>盾是给箭用的:旧判据问的是
+     * {@link Menace#tooClose}(僵尸 2.73 格),而箭是在八格外射来的 —— 于是骷髅在射程边缘放箭,
+     * 她永远不举盾,站在原地把箭吃满。近战贴脸那几格另有走位与挥刀,不必靠举盾。
      *
      * <p>不看攻击冷却:原版举着盾照样能挥刀,两件事不冲突;也不拦攻击层 —— 那样两层就又
      * 耦上了。举着会减速,代价认了:能挡住的那一下比早退半格值。盾被斧子破了会进冷却,
      * 那时她就正常跑。
      *
-     * <p>同行没有可抄的(AltoClef 完全没有用盾逻辑,Meteor 管的是怎么破<b>对手</b>的盾),
-     * 这套判据与 PR #13 的 {@code ShieldCombatPolicy} 同源,只是去掉了"冷却好了放盾"
-     * 那一步 —— 既然能边举边砍,那一步是多余的。
+     * <p><b>弓与盾抢同一个 useItem。</b>老代码在弓战斗时直接 {@code return},于是举着的盾没人放,
+     * 拉弓的 {@code startUsingItem} 是个空操作,而 {@code RangedShot.tickUsing} 把盾当成弓慢慢
+     * 拉到 15 刻、放掉、记一次"射出去了" —— 箭一支没少,战果却记上了。所以弓战斗走的是
+     * {@code mustFreeHands} 那一支:放盾,而不是"不碰"。
      */
     private void tickShield() {
-        if (bowFighting) {
-            return;
-        }
         boolean raised = shieldRaised();
-        boolean threatened = false;
+        boolean usingOtherItem = player.isUsingItem() && !raised;
+        boolean attackReady = player.getAttackStrengthScale(0.0f) >= Swing.ATTACK_READY;
+        boolean threatened = rangedThreatNearby();
+        // <b>没威胁时不从背包里掏盾</b>:她说的是"用盾",不是"把副手改成盾"。手上或副手已经有盾
+        // 时照常按下面的判据用,但空手掏盾只在真有箭飞过来的时候做 —— 那本来是主人的装备。
+        ItemStack shield = raised ? player.getUseItem() : player.getOffhandItem();
+        if (!shield.is(Items.SHIELD)) {
+            shield = threatened ? equipShield() : ItemStack.EMPTY;
+        }
+        boolean usable = !shield.isEmpty() && !player.getCooldowns().isOnCooldown(shield.getItem());
+        switch (ShieldPlan.decide(usable, usingOtherItem, raised, attackReady, threatened,
+                bowFighting)) {
+            case WAIT, PROCEED, HOLD -> { }
+            case RELEASE -> ShieldPlan.lowerShield(player);
+            case RAISE -> {
+                // 上一刻手上还占着别的东西时 startUsingItem 是空操作,等她腾出手自然会举起来。
+                if (!player.isUsingItem()) {
+                    player.startUsingItem(InteractionHand.OFF_HAND);
+                }
+            }
+        }
+    }
+
+    /**
+     * 有没有<b>远程</b>威胁 —— 盾是给箭用的。两种都算:
+     * <ul>
+     *   <li>已经在飞的、会落到她身上的弹射物(见 {@link Menace#incomingField});</li>
+     *   <li>射程内有视线、手上或天生有远程手段的怪(骷髅、拿弩的猪灵、掠夺者、烈焰人……)。</li>
+     * </ul>
+     */
+    private boolean rangedThreatNearby() {
+        if (!incomingField.isEmpty()) {
+            return true;
+        }
         for (var mob : hostiles) {
-            if (Menace.tooClose(mob, player)) {
-                threatened = true;
-                break;
+            if (Menace.threatensAtRange(mob, player)) {
+                return true;
             }
         }
-        if (!threatened) {
-            if (raised) {
-                player.releaseUsingItem();
-            }
-            return;
-        }
-        if (raised || player.isUsingItem()) {
-            return;   // 已经举着,或者手上占着别的东西
-        }
-        ItemStack shield = player.getOffhandItem().is(Items.SHIELD)
-                ? player.getOffhandItem() : equipShield();
-        if (shield.isEmpty() || player.getCooldowns().isOnCooldown(shield.getItem())) {
-            return;   // 没盾,或者被斧子破了还在冷却 —— 正常跑
-        }
-        player.startUsingItem(InteractionHand.OFF_HAND);
+        return false;
     }
 
     private boolean shieldRaised() {
@@ -542,7 +573,8 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
             // <b>没有目标也要走。</b>判据的 SKIRMISH 可以是"对全场的"(挑不出能打的,但还有
             // 东西追她),那时该退开等机会 —— 这里曾经第一行就 {@code target == null} 早退,
             // 于是判据每刻正确地喊"走位"、执行层每刻安静地什么都不做,日志看着一切正常,
-            // 直到她被苦力怕炸死。什么时候不用走由 standoffGoal 说(既无目标也无怪才返回 null)。
+            // 直到她被苦力怕炸死。什么时候不用走由 standoffGoal 说(既无目标、也无怪、也没箭飞来
+            // 才返回 null)。
             //
             // 目标会动:要 trackGoal 而不是 toGoal —— 后者一旦到达就永久 ARRIVED,
             // 她会站在原地不再跟位,别的怪就能从容贴上来。
@@ -623,19 +655,23 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     private NavGoal standoffGoal() {
         // 躲避场只收敌对生物:它们才有危险半径。目标本身归下面的环管——点名的猪牛鸡不是
         // 敌对生物,不在这份名单里,但照样是要走过去打的目标。"有没有目标"与"附近有没有怪"
-        // 是两个问题,这里早退只看前者是否也为空:既无目标也无怪,才真的没处可站。
-        // 两份材料都引用本刻的判断:目标是判据选的那一只,怪是 surveyField 扫的那一份。
+        // 是两个问题,这里早退只看前者是否也为空:既无目标也无怪、也没箭飞来,才真的没处可站。
+        // 三份材料都引用本刻的判断:目标是判据选的那一只,怪与来袭弹是 surveyField 扫的那一份。
         var field = hostiles;
+        var incoming = incomingField;
         boolean haveTarget = target != null && !target.isRemoved();
-        if (!haveTarget && field.isEmpty()) {
+        if (!haveTarget && field.isEmpty() && incoming.isEmpty()) {
             return null;
         }
         logStandoff(field);
+        // <b>来袭弹也是威胁,而且坐标取预测落点。</b>用箭此刻的位置等于让开一个空处 ——
+        // 它下一刻落在她原本要走的那一格上。两种威胁同一把尺子(间距含格量化补偿)。
+        List<GoalAvoidEntities.Threat> threats = new ArrayList<>(Menace.field(player, field));
+        threats.addAll(incoming);
         if (!haveTarget) {
             // <b>没有目标也照样走位</b>:环退化成"离每一只都出了它的危险半径"。
-            // 场上只剩一只点着的爬行者(她没弓打不了)时走的就是这一支 —— 退开等引信熄,
-            // 而不是跑三十二格。
-            return NavGoal.avoid(Menace.AVOID_PENALTY, Menace.field(player, field));
+            // 场上只剩一只点着的爬行者(她没弓打不了)、或者只有一支箭飞来时走的就是这一支。
+            return NavGoal.avoid(Menace.AVOID_PENALTY, threats);
         }
         // 走位是<b>一个环</b>:外沿别跟丢,内沿是每一只都够不着她。太近自然往外走,太远
         // 自然往回走 —— "拉开"不是另一个动作。
@@ -650,11 +686,11 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
                 NavGoal.ring(target.blockPosition(), skirmishInner(), skirmishOuter()),
                 Menace.AVOID_PENALTY,
                 bowFighting
-                        ? Menace.field(player, field).stream()
+                        ? threats.stream()
                                 .map(x -> x.withClearance(
                                         Math.max(x.clearance(), BOW_MIN_DISTANCE)))
                                 .toList()
-                        : Menace.field(player, field));
+                        : threats);
         // 弓那一套的内沿对<b>每一只</b>都成立:她要跟所有怪保持五格,不只是当前目标。
     }
 
@@ -667,10 +703,12 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
             }
         }
         String line = target == null || target.isRemoved()
-                ? String.format("无目标(只拉开) 太近=%d 场上=%d", tooClose, field.size())
-                : String.format("%s 目标=%d 距离=%.1f 带=[%.2f, %.2f] 太近=%d 场上=%d",
+                ? String.format("无目标(只拉开) 太近=%d 场上=%d 来袭=%d",
+                        tooClose, field.size(), incomingField.size())
+                : String.format("%s 目标=%d 距离=%.1f 带=[%.2f, %.2f] 太近=%d 场上=%d 来袭=%d",
                         bowFighting ? "弓" : "剑", target.getId(), player.distanceTo(target),
-                        skirmishInner(), skirmishOuter(), tooClose, field.size());
+                        skirmishInner(), skirmishOuter(), tooClose, field.size(),
+                        incomingField.size());
         if (!line.equals(lastStandoffLog)) {
             lastStandoffLog = line;
             Constants.LOG.info("[numen-attack] 站位 {}", line);
@@ -680,6 +718,10 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     // ==================== 远程 ====================
 
     private TaskState shootAt(Loadout loadout) {
+        // <b>拉弓前先把盾放下。</b>两者抢同一个 useItem:原版 startUsingItem 在 isUsingItem()
+        // 时直接 return,于是下面的 useItem 全是空操作,而 tickUsing 会把盾当成拉弓、攒够 15 刻
+        // 放掉它并记一次"射出" —— 一支箭都没飞。tickShield 已经处理过,这里是第二道保险。
+        ShieldPlan.lowerShield(player);
         Loadout.Pick weapon = loadout.ranged();
         if (weapon == null) {
             return closeIn();   // 弓没了:回去走位,别放弃这只
@@ -911,6 +953,9 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         abortShot();
         InputDriver.halt(player);
         player.setShiftKeyDown(false);
+        // <b>收尾必须放盾</b>:放下盾原本只有 tickShield 这一条路径,而收场之后它不再跑,
+        // 于是她带着举起的盾去做下一件事 —— 减速,而且再也用不了 useItem。
+        ShieldPlan.lowerShield(player);
         super.cleanup();
     }
 

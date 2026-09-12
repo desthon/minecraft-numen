@@ -78,9 +78,9 @@ public final class AttackPlan {
         if (outmatched(b.effectiveHealth()) && !b.cornered()) {
             return new Move(Action.DISENGAGE, NO_FOE);
         }
-        // 「会炸的贴太近了」也不在这儿判。点着的爬行者<b>危险半径就是它的爆炸波及范围</b>
-        // (6.71 格),走位环的内沿自然把她顶到那之外 —— 曾经它是一个独立动作(AVOID),
-        // 于是"躲爆炸"和"走位"成了互斥的两个状态,躲的那一支还不还手。
+        // 「会炸的贴太近了」也不在这儿判。点着的爬行者<b>危险半径就是原版的熄火线</b>
+        // (7.0 + 格量化补偿 = 7.71 格),走位环的内沿自然把她顶到那之外 —— 曾经它是一个
+        // 独立动作(AVOID),于是"躲爆炸"和"走位"成了互斥的两个状态,躲的那一支还不还手。
         //
         // ③ 手上没有能打的东西:赤手对上会还手的东西不是一条出路,退开。
         //
@@ -134,18 +134,22 @@ public final class AttackPlan {
     /**
      * 这一只值不值得当目标。
      *
-     * <p><b>会炸的东西,没有远程手段就根本不该当目标</b>:她要的是躲开它,不是打它。让它进
-     * 候选的话,判据会在安全线上一格 AVOID、一格 ABANDON 地来回跳——放弃后下一刻又被选回来,
-     * 实测每秒三轮。躲它归 ② 那一档,不归"打谁"。
+     * <p><b>会炸的东西,没有弓就根本不该当目标 —— 引信没点着的也不行。</b>她要的是躲开它,
+     * 不是打它。让它进候选的话,判据会在安全线上一格 AVOID、一格 ABANDON 地来回跳——放弃后
+     * 下一刻又被选回来。躲它归走位那一档,不归"打谁"。
+     *
+     * <p>曾经这里放的是 {@code armed()}:没点火的爬行者当普通怪打,"够得着 3.30、它 3.0 才点火,
+     * 中间那条带能打到它而不触发"。那条带只有 <b>0.3 格</b>,而格量化误差是 {@code CELL_SLACK}
+     * 0.71 —— 判据说"这一格能打",寻路按格心算出来的下一格却已经在点火区里,实测她停在点火区
+     * 里挥刀、被引信炸死。窗口比误差还窄的站位不是"窄",是<b>不存在</b>。
+     *
+     * @see Menace#explosiveDangerRadius 未点火爬行者的危险半径已经顶到点火线,环的内沿也过不去
      */
     private static boolean fightable(Battlefield b, Foe f) {
         if (!f.authorized()) {
             return false;
         }
-        // 引信没点着的爬行者就是一只普通怪:她够得着 4 格、它 3 格才点火,中间那条一格宽的
-        // 带能打到它而不触发。曾经"会炸的一律不当目标",于是她只会绕着走、永远解决不掉,
-        // 还在安全线上一格 AVOID 一格 ABANDON 地来回跳。
-        return !f.armed() || b.hasRanged();
+        return !f.explosive() || b.hasRanged();
     }
 
     /**
@@ -154,7 +158,7 @@ public final class AttackPlan {
      * <pre>
      * 走得到 且 有近战武器          → 剑战斗(省箭)
      * 走不到,或者只有弓            → 弓战斗
-     * 引信在走的会炸物             → 弓战斗(贴上去等于自己引爆)
+     * 会炸的东西(不管点没点火)    → 弓战斗(贴上去等于自己引爆)
      * 两样都没有                   → 拳头也得上,当剑战斗
      * </pre>
      *
@@ -165,7 +169,9 @@ public final class AttackPlan {
         if (!b.hasRanged()) {
             return Action.SKIRMISH;   // 没弓:走得到走不到都只能凑近了打
         }
-        if (foe.armed() || !foe.reachable() || !b.hasMelee()) {
+        // 会炸的一律用弓:没点火的爬行者现在只有弓能当它的目标(见 fightable),
+        // 而"走回去用剑砍一只没点火的爬行者"正是把她送进点火区的那条路。
+        if (foe.explosive() || !foe.reachable() || !b.hasMelee()) {
             return Action.BOW;
         }
         return Action.SKIRMISH;

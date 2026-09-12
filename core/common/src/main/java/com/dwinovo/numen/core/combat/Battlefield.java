@@ -33,7 +33,9 @@ public record Battlefield(double effectiveHealth,
      *
      * @param id         运行时实体 id
      * @param distance   离她多远
-     * @param explosive  它会炸,不管这一刻炸没炸——走近它要留余量,别踩进点火线
+     * @param explosive  它会炸,不管这一刻炸没炸。它同时是 <b>"能不能当目标"</b>的判据
+     *                   ({@code AttackPlan.fightable}:没弓就不占坑)——走近它要留余量,
+     *                   别踩进点火线,而没点火的爬行者那条安全带比格量化误差还窄
      * @param armed      它<b>现在就要炸了</b>:引信在走,或者是一打就炸的末影水晶
      * @param engaging   正在针对她(锁定了她,或刚打了她)
      * @param reachable  <b>上一段寻路搜得出路</b>。够不着是拓扑性质、不是距离性质,只有
