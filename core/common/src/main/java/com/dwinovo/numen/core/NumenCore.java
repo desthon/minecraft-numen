@@ -136,6 +136,8 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.ScanNearbyEntitiesTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.ScanBlocksTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.ScaffoldMaterialsTool());
+        // 顺路挖的矿名单:同样是「一份跟着同伴走的常设选择」,所以紧挨着垫路料登记
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.work.BonusOresTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.LookAroundTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.InspectBlockTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.perception.InspectBlockStorageTool());

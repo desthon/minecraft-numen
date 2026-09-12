@@ -129,6 +129,14 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private static final int DROP_LOITER_TICKS = 15;
 
     private final List<BlockPos> knownOres = new ArrayList<>();
+
+    /**
+     * 主人配的「顺路挖」那几种矿(见 {@code BonusOres}),任务开始时读一次。
+     *
+     * <p>读一次而不是每刻读:它是一份<b>任务期间不变</b>的名单——中途改了清单,下一次挖矿
+     * 任务才生效。每刻去问注册表既慢又会让同一趟任务的候选集合飘。
+     */
+    private Set<Block> bonus = Set.of();
     /**
      * 当前地形下挖不动的格子 —— <b>只有 {@code NO_SHOT} 进得来</b>:够到测试过了,却连续
      * 二十刻拉不出射线(瞄准量化、站位上方有个檐口)。这是关于<b>这一格</b>的、可复现的事实。
@@ -224,8 +232,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         baseline = inventoryMatch();
         // 登记目标进共享索引并立即首查;冷区域的索引构建由每次查询的预算分摊,
         // 覆盖完整前 onTick 的终局判定会等着(lastQueryComplete)。
+        // 顺路挖的矿也要进索引:索引按方块类型建表,不登记就永远查不到它们。
+        bonus = com.dwinovo.numen.core.task.mine.BonusOres.of(player);
         if (player.level() instanceof ServerLevel sl) {
-            TargetIndex.register(sl, r.targets);
+            TargetIndex.register(sl, queryTargets());
         }
         runQuery();
         lastProgressTick = player.level().getGameTime();
@@ -878,7 +888,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         lastQueryChunk = ChunkPos.asLong(player.blockPosition());
         heartbeatTimer = QUERY_HEARTBEAT_TICKS;
         queryCooldown = QUERY_MIN_GAP_TICKS;
-        TargetIndex.Result res = TargetIndex.query(sl, player.blockPosition(), r.targets,
+        TargetIndex.Result res = TargetIndex.query(sl, player.blockPosition(), queryTargets(),
                 MAX_ORES, QUERY_MAX_CHUNK_RADIUS, QUERY_BUILD_BUDGET);
         lastQueryComplete = res.complete();
         if (lastQueryComplete) {
@@ -889,6 +899,32 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 player.blockPosition().toShortString(), res.hits().size(), res.complete(),
                 knownOres.size());
         mergeHits(res.hits());
+    }
+
+    /** 查询与索引要认的方块集合:任务点名的 + 主人配的顺路矿。 */
+    private Set<Block> queryTargets() {
+        if (bonus.isEmpty()) {
+            return r.targets;
+        }
+        Set<Block> union = new java.util.HashSet<>(r.targets);
+        union.addAll(bonus);
+        return union;
+    }
+
+    /**
+     * 这一格算不算候选:任务点名的那几种,或者顺路清单里的那几种——但顺路矿必须<b>够近</b>。
+     *
+     * <p>"顺路"是个距离概念:二十四格外的钻石不叫路过,那是一次专门绕行,该由模型另外派一个
+     * 任务去做。同一个判据也让"顺路"永远不会变成"改派"。
+     */
+    private boolean wantedHere(BlockState state, BlockPos p) {
+        if (r.targets.contains(state.getBlock())) {
+            return true;
+        }
+        return bonus.contains(state.getBlock())
+                && player.blockPosition().distSqr(p)
+                <= com.dwinovo.numen.core.task.mine.BonusOres.ADMIT_RADIUS
+                        * com.dwinovo.numen.core.task.mine.BonusOres.ADMIT_RADIUS;
     }
 
     /** Add fresh, still-workable hits to knownOres, then prune (which re-validates
@@ -914,7 +950,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 com.dwinovo.numen.core.pathing.moves.TerrainPermit.TERRAFORM);
         knownOres.removeIf(p -> {
             var state = level.getBlockState(p);
-            if (state.isAir() || !r.targets.contains(state.getBlock()) || unworkable.contains(p)) {
+            if (state.isAir() || !wantedHere(state, p) || unworkable.contains(p)) {
                 return true;
             }
             // 玩家(bug 14:主人自己)放上去的方块不进名单:她要挖的是矿,不是主人的建材 ——
@@ -938,7 +974,11 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             }
             return false;
         });
-        knownOres.sort(Comparator.comparingDouble(feet::distSqr));
+        // 点名的矿永远排在顺路矿前面:反过来她会一路被别的矿牵走,交差时你要的一样没到手。
+        Level sortLevel = player.level();
+        knownOres.sort(Comparator
+                .comparingInt((BlockPos p) -> r.targets.contains(sortLevel.getBlockState(p).getBlock()) ? 0 : 1)
+                .thenComparingDouble(feet::distSqr));
         if (knownOres.size() > MAX_ORES) {
             knownOres.subList(MAX_ORES, knownOres.size()).clear();
         }

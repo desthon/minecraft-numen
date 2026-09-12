@@ -53,32 +53,33 @@ public final class CompanionRegistry extends SavedData {
                         String deathCause, long diedAt,
                         Optional<ResourceKey<Level>> deathDim, Optional<BlockPos> deathPos,
                         String skinValue, String skinSig,
-                        String taskTool, String taskArgs, List<String> scaffoldMaterials) {
+                        String taskTool, String taskArgs, List<String> scaffoldMaterials,
+                        List<String> bonusOres) {
         /** A live companion (not dead), no borrowed skin, idle, spending the default scaffolding. */
         public Entry(String name, UUID owner, ResourceKey<Level> dimension, BlockPos pos) {
             this(name, owner, dimension, pos, "", 0L, Optional.empty(), Optional.empty(),
-                    "", "", "", "", DEFAULT_SCAFFOLD);
+                    "", "", "", "", DEFAULT_SCAFFOLD, List.of());
         }
 
         /** 她现在在做什么(工具名 + 当时的参数);空串 = 闲着。见 {@code TaskPersistence}。 */
         public Entry doing(String tool, String args) {
             return new Entry(name, owner, dimension, pos, deathCause, diedAt, deathDim, deathPos,
                     skinValue, skinSig,
-                    tool == null ? "" : tool, args == null ? "" : args, scaffoldMaterials);
+                    tool == null ? "" : tool, args == null ? "" : args, scaffoldMaterials, bonusOres);
         }
 
         /** 刷新落点(休眠/移动时的 respawn 提示),皮肤与死亡状态原样保留。 */
         public Entry movedTo(ResourceKey<Level> dimension, BlockPos pos) {
             return new Entry(name, owner, dimension, pos, deathCause, diedAt, deathDim, deathPos,
                     skinValue, skinSig,
-                    taskTool, taskArgs, scaffoldMaterials);
+                    taskTool, taskArgs, scaffoldMaterials, bonusOres);
         }
 
         /** 换上 Mojang 签名的皮肤数据(value+signature)。 */
         public Entry withSkin(String value, String sig) {
             return new Entry(name, owner, dimension, pos, deathCause, diedAt, deathDim, deathPos,
                     value == null ? "" : value, sig == null ? "" : sig, taskTool, taskArgs,
-                    scaffoldMaterials);
+                    scaffoldMaterials, bonusOres);
         }
 
         /**
@@ -89,14 +90,25 @@ public final class CompanionRegistry extends SavedData {
         public Entry withScaffoldMaterials(List<String> materials) {
             return new Entry(name, owner, dimension, pos, deathCause, diedAt, deathDim, deathPos,
                     skinValue, skinSig,
-                    taskTool, taskArgs, materials == null ? List.of() : List.copyOf(materials));
+                    taskTool, taskArgs, materials == null ? List.of() : List.copyOf(materials), bonusOres);
+        }
+
+        /**
+         * 顺路挖的矿(namespaced block id,或 {@code #ns:tag})。<b>空表 = 一种都不顺路挖</b>,
+         * 这正是"没配过"的意思——它没有安全的出厂默认值:替主人决定"这些矿可以拿"比他自己
+         * 说一句贵得多。语义与消费见 {@code BonusOres}。
+         */
+        public Entry withBonusOres(List<String> ores) {
+            return new Entry(name, owner, dimension, pos, deathCause, diedAt, deathDim, deathPos,
+                    skinValue, skinSig,
+                    taskTool, taskArgs, scaffoldMaterials, ores == null ? List.of() : List.copyOf(ores));
         }
 
         /** 记下"死在哪儿"。{@code dim}/{@code pos} 传 null = 不知道掉哪了(见记录头)。 */
         Entry dead(String cause, long at, ResourceKey<Level> dim, BlockPos where) {
             return new Entry(name, owner, dimension, pos, cause, at,
                     Optional.ofNullable(dim), Optional.ofNullable(where), skinValue, skinSig,
-                    taskTool, taskArgs, scaffoldMaterials);
+                    taskTool, taskArgs, scaffoldMaterials, bonusOres);
         }
 
         /**
@@ -106,14 +118,14 @@ public final class CompanionRegistry extends SavedData {
          */
         Entry alive() {
             return new Entry(name, owner, dimension, pos, "", 0L, deathDim, deathPos, skinValue,
-                    skinSig, taskTool, taskArgs, scaffoldMaterials);
+                    skinSig, taskTool, taskArgs, scaffoldMaterials, bonusOres);
         }
 
         /** 遗物坐标已经交代过了 —— 清掉,免得下次复活又把同一件旧事翻出来讲一遍。 */
         Entry withClearedDeathPos() {
             return new Entry(name, owner, dimension, pos, deathCause, diedAt,
                     Optional.empty(), Optional.empty(), skinValue,
-                    skinSig, taskTool, taskArgs, scaffoldMaterials);
+                    skinSig, taskTool, taskArgs, scaffoldMaterials, bonusOres);
         }
 
         static final Codec<Entry> CODEC = RecordCodecBuilder.create(i -> i.group(
@@ -136,7 +148,11 @@ public final class CompanionRegistry extends SavedData {
                 Codec.STRING.optionalFieldOf("taskTool", "").forGetter(Entry::taskTool),
                 Codec.STRING.optionalFieldOf("taskArgs", "").forGetter(Entry::taskArgs),
                 Codec.STRING.listOf().optionalFieldOf("scaffold", DEFAULT_SCAFFOLD)
-                        .forGetter(Entry::scaffoldMaterials)
+                        .forGetter(Entry::scaffoldMaterials),
+                // 顺路挖的矿。缺省空表 = 没配过 = 一种都不顺路挖(见 withBonusOres)。
+                // 同样必须可缺省:老存档里没有这个键,当必填就得整份存档读不回来。
+                Codec.STRING.listOf().optionalFieldOf("bonus_ores", List.of())
+                        .forGetter(Entry::bonusOres)
         ).apply(i, Entry::new));
     }
 
