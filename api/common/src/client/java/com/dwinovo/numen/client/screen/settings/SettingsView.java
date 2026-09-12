@@ -194,7 +194,9 @@ public final class SettingsView {
                             })
                     .withToggle(ModLanguageData.Keys.VOICE_ENABLED,
                             () -> com.dwinovo.numen.client.voice.VoiceLibrary.instance().enabled(),
-                            v -> com.dwinovo.numen.client.voice.VoiceLibrary.instance().setEnabled(v));
+                            v -> com.dwinovo.numen.client.voice.VoiceLibrary.instance().setEnabled(v))
+                    // 与人设库同一颗 ↻:库是文件,库外改动得有个当场看得见的入口
+                    .withTitleAction("↻", () -> com.dwinovo.numen.client.voice.VoiceLibrary.instance().reload());
         }
         return voiceListPanel;
     }
@@ -397,6 +399,12 @@ public final class SettingsView {
         if (s == Section.PERSONA) {
             // 人设是目录里的 .md 文件:进页先重扫,外部编辑器的修改即时可见。
             PersonaLibrary.instance().reload();
+        }
+        if (s == Section.VOICE) {
+            // 声线库同理,而且这里以前漏了:voice.json 被库外改过(手工编辑/同步工具)之后,
+            // 进这一页看到的还是开服那一刻的旧名单——"我明明加了声线,界面里没有",
+            // 与「音色选不了」是同一个坑的另一半。编辑卡/召唤卡一直重扫,这一页没有。
+            com.dwinovo.numen.client.voice.VoiceLibrary.instance().reload();
         }
         addingMcp = false;
         addingPersona = false;

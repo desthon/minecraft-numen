@@ -23,8 +23,14 @@ final class VoiceChoices {
     /** 与 {@code CompanionEditPanel.VOICE_NONE} 同义;放这里是为了单测能引用。 */
     static final String NONE = "__none__";
 
-    /** {@code ids} 与 {@code names} 一一对应,{@code selected} 恒是合法下标。 */
-    record Choices(List<String> ids, List<String> names, int selected) {
+    /**
+     * {@code ids} 与 {@code names} 一一对应,{@code selected} 恒是合法下标。
+     *
+     * @param dangling 当前绑定指向的条目已不在库里(被删/改名)。此时选中位落回
+     *                 {@link #NONE}——"无"确实是此刻的真相,但它是被弄丢的,不是主人
+     *                 选的:界面得把这句话说出来,否则他只会看见"无(静音)"发懵。
+     */
+    record Choices(List<String> ids, List<String> names, int selected, boolean dangling) {
 
         /** 下标 → 声线条目 id;选中 {@link #NONE} 时给 null(= 无声)。 */
         String idAt(int index) {
@@ -54,6 +60,9 @@ final class VoiceChoices {
             }
         }
         String current = currentId == null || currentId.isBlank() ? NONE : currentId;
-        return new Choices(List.copyOf(ids), List.copyOf(names), Math.max(0, ids.indexOf(current)));
+        int index = ids.indexOf(current);
+        // index < 0 = 绑定悬空(条目被删/改名);选中位落回 0,但这件事本身要报出去。
+        boolean dangling = index < 0 && !NONE.equals(current);
+        return new Choices(List.copyOf(ids), List.copyOf(names), Math.max(0, index), dangling);
     }
 }

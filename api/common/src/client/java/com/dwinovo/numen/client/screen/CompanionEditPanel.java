@@ -256,14 +256,19 @@ public final class CompanionEditPanel {
         voicePick.setBounds(x + half + 6, rowY2, half, NumenStyle.CONTROL_H);
 
         ry = rowY2 + NumenStyle.ROW_PITCH;
-        // 库里没条目、或语音总开关关着——两种"选了她也不会出声"的情形,各给一句话。
-        // 总开关那条尤其要紧:声线绑了、开关关着,界面上一切正常却永远沉默。
+        // 三种"选了她也不会出声"的情形,各给一句话:库里没条目、语音总开关关着、
+        // 绑定指向的条目被删了。总开关那条尤其要紧:声线绑了、开关关着,界面上
+        // 一切正常却永远沉默;悬空绑定则相反,看着像主人自己选了"无"。
         voiceHint = null;
         voiceHintY = -1;
         if (voiceEntries.isEmpty()) {
-            voiceHint = "No voice yet - add one in Settings > Voice.";
+            voiceHint = t(ModLanguageData.Keys.EDIT_VOICE_HINT_EMPTY);
         } else if (!VoiceLibrary.instance().enabled()) {
-            voiceHint = "Voice is off - turn it on in Settings > Voice.";
+            voiceHint = t(ModLanguageData.Keys.EDIT_VOICE_HINT_OFF);
+        } else if (voices.dangling()) {
+            // 绑定指向的条目被删了:下拉里"无(静音)"落在选中位,看着像主人自己选的。
+            // 这一句把"是她掉了"说出来——否则他只是听见她哑了,却查不出为什么。
+            voiceHint = t(ModLanguageData.Keys.EDIT_VOICE_HINT_DANGLING);
         }
         if (voiceHint != null) {
             // 整行宽:半行宽装不下"去哪儿配"那半句,而那句话正是这条提示的全部意义
@@ -312,9 +317,11 @@ public final class CompanionEditPanel {
 
     /** 主卡那行的文案。条数 = 她现在会顺手挖几种;还没读到过就是未知,不假装是 0。 */
     private String oresRowLabel() {
-        String n = oresLoading ? "..." : oresCount < 0 ? "?" : oresCount == 0 ? "none"
+        String n = oresLoading ? t(ModLanguageData.Keys.EDIT_ORES_ROW_LOADING)
+                : oresCount < 0 ? t(ModLanguageData.Keys.EDIT_ORES_ROW_UNKNOWN)
+                : oresCount == 0 ? t(ModLanguageData.Keys.EDIT_ORES_ROW_NONE)
                 : String.valueOf(oresCount);
-        return "Bonus ores: " + n + "  ▸";
+        return t2(ModLanguageData.Keys.EDIT_ORES_ROW, n);
     }
 
     /**
@@ -329,19 +336,19 @@ public final class CompanionEditPanel {
         int ry = y;
         trashX = x + w - 12;   // 遣散垃圾桶在子页照样在(逃生口不该被换页收走)
         trashY = ry + 3;
-        Button back = ui.add(new Button("< Back", Button.Style.NORMAL, this::closeOresPage));
+        Button back = ui.add(new Button(t(ModLanguageData.Keys.EDIT_ORES_BACK), Button.Style.NORMAL, this::closeOresPage));
         back.setBounds(x, ry, 60, 16);
-        Label title = ui.add(new Label("Bonus ores", Label.Role.PRIMARY));
+        Label title = ui.add(new Label(t(ModLanguageData.Keys.EDIT_ORES_TITLE), Label.Role.PRIMARY));
         title.setBounds(x + 66, ry + 4, Math.max(40, w - 66 - 84), 9);
         // 清空:右缘留出 16px,别压上右上角遣散垃圾桶的热区(它先判命中,压上去就是误触)
-        Button clear = ui.add(new Button("Clear list", Button.Style.NORMAL, this::clearOres));
+        Button clear = ui.add(new Button(t(ModLanguageData.Keys.EDIT_ORES_CLEAR), Button.Style.NORMAL, this::clearOres));
         clear.setBounds(x + w - 78, ry, 62, 16);
         ry += 20;
         // 两行说明各自短到一行装得下(Label 超宽会截断,说明被截掉就等于没说)。
-        Label hint1 = ui.add(new Label("Saved right away - it lives on the server.", Label.Role.MUTED));
+        Label hint1 = ui.add(new Label(t(ModLanguageData.Keys.EDIT_ORES_HINT_SAVED), Label.Role.MUTED));
         hint1.setBounds(x, ry, w, 9);
         ry += 10;
-        Label hint2 = ui.add(new Label("Mined when she passes within 24 blocks of a job.", Label.Role.MUTED));
+        Label hint2 = ui.add(new Label(t(ModLanguageData.Keys.EDIT_ORES_HINT_RANGE), Label.Role.MUTED));
         hint2.setBounds(x, ry, w, 9);
         ry += 12;
 
@@ -356,9 +363,9 @@ public final class CompanionEditPanel {
                 .rowClick(this::oreRowClicked));
         list.setBounds(x, ry, w, Math.max(ORE_ROW_H, oresStatusY1 - ry - 4));
         oresField = ui.add(new TextField(oresInput, v -> oresInput = v)
-                .placeholder("minecraft:diamond_ore or #minecraft:iron_ores"));
+                .placeholder(t(ModLanguageData.Keys.EDIT_ORES_PLACEHOLDER)));
         oresField.setBounds(x, inputY, w - 62, NumenStyle.CONTROL_H);
-        Button add = ui.add(new Button("Add", Button.Style.ACCENT, this::addOre));
+        Button add = ui.add(new Button(t(ModLanguageData.Keys.EDIT_ORES_ADD), Button.Style.ACCENT, this::addOre));
         add.setBounds(x + w - 56, inputY, 56, NumenStyle.CONTROL_H);
     }
 
@@ -367,14 +374,14 @@ public final class CompanionEditPanel {
      * 的真实选择(见 BonusOres 的类注释),所以它读起来要像一句交代,不像一次失败。
      */
     private String oresStatusText() {
-        if (oresLoading) return "Reading the list from the server...";
+        if (oresLoading) return t(ModLanguageData.Keys.EDIT_ORES_READING);
         if (oresNote != null) return oresNote;
         if (ores.isEmpty()) {
-            return "Nothing on the list yet - she mines nothing she merely walks past.";
+            return t(ModLanguageData.Keys.EDIT_ORES_EMPTY);
         }
-        String base = ores.size() + (ores.size() == 1 ? " ore" : " ores") + " picked up on the way";
+        String base = t2(ModLanguageData.Keys.EDIT_ORES_COUNT, ores.size());
         if (!oresNeedTool.isEmpty()) {
-            base += " - " + oresNeedTool.size() + " of them need a better tool";
+            base += t2(ModLanguageData.Keys.EDIT_ORES_NEED_TOOL, oresNeedTool.size());
         }
         return base;
     }
@@ -426,7 +433,7 @@ public final class CompanionEditPanel {
         }
         if (Minecraft.getInstance().getConnection() == null) {
             oresLoading = false;
-            oresNote = "Not connected - the bonus-ore list lives on the server.";
+            oresNote = t(ModLanguageData.Keys.EDIT_ORES_OFFLINE);
             host.rebuildPanel();
             return false;
         }
@@ -447,7 +454,7 @@ public final class CompanionEditPanel {
         if (!reply.success()) {
             // 失败不改显示:上一份好数据比一片空白更接近真相,解释放状态行
             oresNote = reply.message() == null || reply.message().isBlank()
-                    ? "The server did not answer the bonus-ores call." : reply.message();
+                    ? t(ModLanguageData.Keys.EDIT_ORES_NO_REPLY) : reply.message();
             host.rebuildPanel();
             return;
         }
@@ -458,8 +465,7 @@ public final class CompanionEditPanel {
         oresCount = ores.size();
         oresNote = null;
         if (deleting != null && reply.has(deleting)) {
-            oresNote = "Still listed: it comes from a #tag. Clear the list and add the ores"
-                    + " you want one by one.";
+            oresNote = t(ModLanguageData.Keys.EDIT_ORES_TAG_KEPT);
         }
         host.rebuildPanel();
     }
@@ -468,14 +474,14 @@ public final class CompanionEditPanel {
         String typed = oresField != null ? oresField.value() : oresInput;
         String id = BonusOresEditor.normalize(typed);
         if (id.isEmpty()) {
-            oresNote = "Type a block id or a #tag first, e.g. minecraft:diamond_ore.";
+            oresNote = t(ModLanguageData.Keys.EDIT_ORES_NEED_INPUT);
             host.rebuildPanel();
             return;
         }
         if (BonusOresEditor.listed(ores, id)) {
             // 已经在生效名单里了:再 add 一次服务端会多存一份(标签 + 具体 id),镜面却不变。
             // 拦在本地,免得主人以为"加了没反应"。
-            oresNote = "'" + id + "' is already on the list.";
+            oresNote = t2(ModLanguageData.Keys.EDIT_ORES_ALREADY, id);
             host.rebuildPanel();
             return;
         }
@@ -601,5 +607,10 @@ public final class CompanionEditPanel {
 
     private static String t(String key) {
         return I18n.get(key);
+    }
+
+    /** 带参数的取词口:计数、条目名由调用方给,语序交给译文。 */
+    private static String t2(String key, Object... args) {
+        return I18n.get(key, args);
     }
 }

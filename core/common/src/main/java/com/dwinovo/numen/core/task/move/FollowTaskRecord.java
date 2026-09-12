@@ -15,6 +15,10 @@ import com.dwinovo.numen.task.TaskRecord;
  *
  * <p>{@code mayAlterTerrain} 与 goto 同名同义:跟着走默认不挖不垫;跟不上时任务以失败
  * 收场并列出要动的方块,模型(或主人)点头了再带上它重发。
+ *
+ * <p><b>这里没有坐标</b>,而且要一直保持没有。跟的是人,人一直在动;把某一刻的位置
+ * 存进记录,就等于让她朝那个人<b>曾经</b>站的地方走(见 {@link MoveToTaskRecord} 的
+ * ENTITY 那一段)。位置由任务每刻现读,读数有明文寿命({@link LiveTarget#stale})。
  */
 public final class FollowTaskRecord extends TaskRecord {
 

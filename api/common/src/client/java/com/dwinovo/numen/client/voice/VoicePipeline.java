@@ -2,11 +2,15 @@ package com.dwinovo.numen.client.voice;
 
 import com.dwinovo.numen.Constants;
 import com.dwinovo.numen.client.agent.ClientNumenLookup;
+import com.dwinovo.numen.client.agent.NumenRoster;
+import com.dwinovo.numen.client.chat.ChatLines;
+import com.dwinovo.numen.data.ModLanguageData;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.AbstractClientPlayer;
+import net.minecraft.client.resources.language.I18n;
 
 import java.util.ArrayDeque;
 import java.util.List;
@@ -41,6 +45,12 @@ import java.util.function.Consumer;
  * 队首 {@value #PREFETCH} 段并发合成——下一段在上一段还在播时就开始请求,
  * 播完即接。更深的窗口对本地 GPT-SoVITS 只会造成排队,对按量计费的云服务
  * 则是白花钱（打断时丢弃）,2 是个经验平衡点。
+ *
+ * <h2>失败不静默</h2>
+ * 一句合成失败（鉴权错、额度用完、音色 id 写错、网络不通）以前只有一行
+ * {@code LOG.warn}:聊天框里她的文字照常出现、声音一句没有,界面上没有任何提示,
+ * 主人只看得出"她哑了"。现在失败同时进聊天框,按故障源节流
+ * （{@link VoiceFailureNotice}）——同一口气里的第二句起只写日志,换了声线立刻又能看见。
  */
 public final class VoicePipeline {
 
@@ -62,6 +72,8 @@ public final class VoicePipeline {
 
     private TtsBackend backend;
     private float volume = 1.0f;
+    /** 合成失败的通知节流(见 {@link VoiceFailureNotice}):失败要上聊天框,但一句话一段。 */
+    private final VoiceFailureNotice failureNotice = new VoiceFailureNotice();
     private int generation;
     private EntityVoiceSound playing;
 
@@ -193,6 +205,14 @@ public final class VoicePipeline {
                         target.failed = true;
                         Constants.LOG.warn("[numen-voice#{}] 合成失败({}), 跳过该句: {} — {}",
                                 entityUuid, backend.describe(), truncate(target.text), unwrap(fail));
+                        // 只写日志 = 静默失败:她的文字照常出现、声音一句没有,主人查不出为什么。
+                        // 提醒上聊天框(节流见 VoiceFailureNotice),同一句原因不刷屏。
+                        String reason = unwrap(fail);
+                        if (failureNotice.shouldShow(backend.describe(), System.currentTimeMillis())) {
+                            ChatLines.notice(speakerName(),
+                                    I18n.get(ModLanguageData.Keys.VOICE_SYNTH_FAILED,
+                                            VoiceFailureNotice.shorten(reason)));
+                        }
                     } else {
                         target.audio = audio;
                         // INFO 而非 debug:每句一行,是"流式分句确实在 LLM 说完前就开始
@@ -269,6 +289,12 @@ public final class VoicePipeline {
         if (!delta.has("content") || !delta.get("content").isJsonPrimitive()
                 || !delta.get("content").getAsJsonPrimitive().isString()) return null;
         return delta.get("content").getAsString();
+    }
+
+    /** 提醒行的说话人:名册名;查不到(退世界后迟到的回调)退成短 uuid,别印出 "null:"。 */
+    private String speakerName() {
+        String n = NumenRoster.instance().name(entityUuid);
+        return n == null || n.isBlank() ? "numen#" + entityUuid.toString().substring(0, 8) : n;
     }
 
     private static String truncate(String s) {

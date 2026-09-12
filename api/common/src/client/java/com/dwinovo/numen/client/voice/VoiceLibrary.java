@@ -189,6 +189,34 @@ public final class VoiceLibrary extends JsonLibrary<VoiceLibrary.Entry> {
         return get(com.dwinovo.numen.client.agent.CompanionHome.binding(companion).voiceId());
     }
 
+    /**
+     * {@link #resolve} 给 null 的<b>成因</b>——界面要照着它说清"为什么没声"。
+     *
+     * <p>为什么要在这里判而不是让调用方自己拼:静音的判据只有这一处权威(开关闸门 +
+     * 绑定解析),散到界面里去抄一遍,就会有"库改了判据、界面还在按旧规矩说话"的那天。
+     * 另一边,提醒该不该说、说哪句是界面的事,所以这里只给成因、不给文案。
+     *
+     * <p>{@code NO_BINDING}(没配过声线)是默认状态而不是故障:调用方通常<b>不该</b>为它
+     * 出声,否则每个没配 TTS 的同伴每次开口都来一句提醒。
+     */
+    public enum Muted {
+        /** 全局语音开关关着——所有同伴一起哑。 */
+        SWITCH_OFF,
+        /** 这只同伴没绑声线(主人没配过),或者绑的是空串。 */
+        NO_BINDING,
+        /** 绑定指向的条目已不在库里(被删/改名):她原来有声音,现在是掉了。 */
+        ENTRY_GONE
+    }
+
+    /** 会出声时返回 null;静音时返回成因。与 {@link #resolve} 必须同进同出(测试钉住)。 */
+    public Muted mutedReason(UUID companion) {
+        if (!enabled) return Muted.SWITCH_OFF;
+        if (companion == null) return Muted.NO_BINDING;
+        String id = com.dwinovo.numen.client.agent.CompanionHome.binding(companion).voiceId();
+        if (id == null || id.isBlank()) return Muted.NO_BINDING;
+        return get(id) == null ? Muted.ENTRY_GONE : null;
+    }
+
     // ---- pending summon assignment (same mechanism as PersonaLibrary.pendSummon:
     // the new companion's UUID is unknown until the roster snapshot arrives) ----
 

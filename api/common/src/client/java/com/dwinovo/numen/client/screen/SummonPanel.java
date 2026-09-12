@@ -5,6 +5,7 @@ import com.dwinovo.numen.client.skin.SkinLibrary;
 import com.dwinovo.numen.client.ui.IDrawSurface;
 import com.dwinovo.numen.client.ui.NumenStyle;
 import com.dwinovo.numen.client.ui.NumenTheme;
+import com.dwinovo.numen.client.ui.TextClip;
 import com.dwinovo.numen.client.ui.widget.Button;
 import com.dwinovo.numen.client.ui.widget.Dropdown;
 import com.dwinovo.numen.client.ui.widget.InlineAlert;
@@ -24,8 +25,10 @@ import java.util.List;
 /**
  * 召唤卡——NumenUI 版的瓤:名字 + 人设/模型配置/模式/声线/皮肤五个选择。
  * 人设与声线可空(首项"不配置/无"),模型配置必选(库空则不出下拉,点创建时
- * 才解释——报错在动作处,不在氛围里);模式无 gamemode 权限时是置灰的继承档。
- * 校验错误内联在名字字段上,库为空的说明走页面级胶囊。
+ * 才解释——报错在动作处,不在氛围里);声线那一格<b>恒出下拉</b>,库空与总开关
+ * 关掉各配一行说明(见 {@link VoiceChoices}——"库空就整格不画"曾是"召唤出来的
+ * 同伴永远不吭声、界面上却没有任何解释"的成因之一);模式无 gamemode 权限时是
+ * 置灰的继承档。校验错误内联在名字字段上,库为空的说明走页面级胶囊。
  */
 public final class SummonPanel {
 
@@ -68,7 +71,9 @@ public final class SummonPanel {
     private List<String> voiceIds = List.of();
     private List<String> skinIds = List.of();
     private boolean hasProviders;
-    private boolean hasVoices;
+    /** 声线那一格下面的说明行(库空 / 总开关关掉时才画);-1 = 本帧不画。 */
+    private String voiceHint;
+    private int voiceHintX, voiceHintY = -1, voiceHintW;
     private int modeBoxX, modeBoxY, modeBoxW;
     private boolean modeInherited;
 
@@ -91,6 +96,9 @@ public final class SummonPanel {
     public void build(int x, int y, int w, int h, int dropBottom) {
         // 人设下拉的数据源是 persona/ 目录:每次打开召唤面板重扫一遍。
         PersonaLibrary.instance().reload();
+        // 声线库同理,而且这里漏扫过一次:库是文件,库外(手工编辑/同步工具)的新条目
+        // 不进内存镜面,召唤卡就列不出来——表现同样是"音色选不了"。编辑卡一直扫,这张卡没有。
+        VoiceLibrary.instance().reload();
         ui.clear();
         ui.setViewportHeight(dropBottom);
 
@@ -167,25 +175,18 @@ public final class SummonPanel {
         int rowY2 = label(x, ry, ModLanguageData.Keys.VOICE_SUMMON_LABEL);
         label(x + half + 6, ry, ModLanguageData.Keys.SUMMON_SKIN);
         var voiceEntries = VoiceLibrary.instance().list();
-        hasVoices = !voiceEntries.isEmpty();
-        if (hasVoices) {
-            List<String> voiceNames = new ArrayList<>();
-            List<String> ids = new ArrayList<>();
-            ids.add(VOICE_NONE);
-            voiceNames.add(t(ModLanguageData.Keys.VOICE_BIND_NONE));
-            for (var e : voiceEntries) {
-                ids.add(e.id());
-                voiceNames.add(e.name());
-            }
-            voiceIds = ids;
-            Dropdown voicePick = ui.add(new Dropdown(voiceNames,
-                    Math.max(0, voiceIds.indexOf(draft.voiceId == null ? VOICE_NONE : draft.voiceId)),
-                    i -> {
-                        String id = voiceIds.get(i);
-                        draft.voiceId = VOICE_NONE.equals(id) ? null : id;
-                    }));
-            voicePick.setBounds(x, rowY2, half, NumenStyle.CONTROL_H);
-        }
+        // 声线:恒出下拉,库空时它只有"无(静音)"一项——旧行为是"库空就整格不画",
+        // 主人看见标签底下空着、没有任何解释,召唤出来的同伴又永远不吭声,
+        // 两件事攒成一个查不出来的谜(见 VoiceChoices 的类注释)。选不了可以有,
+        // 但必须说清楚为什么、去哪儿配(见下面的提示行)。
+        var voices = VoiceChoices.of(voiceEntries, draft.voiceId,
+                t(ModLanguageData.Keys.VOICE_BIND_NONE));
+        voiceIds = voices.ids();
+        Dropdown voicePick = ui.add(new Dropdown(voices.names(), voices.selected(), i -> {
+            String id = voiceIds.get(i);
+            draft.voiceId = VOICE_NONE.equals(id) ? null : id;
+        }));
+        voicePick.setBounds(x + half + 6, rowY2, half, NumenStyle.CONTROL_H);
         List<String> skinNames = new ArrayList<>();
         List<String> sIds = new ArrayList<>();
         sIds.add(SKIN_DEFAULT);
@@ -201,7 +202,23 @@ public final class SummonPanel {
                 Math.max(0, skinIds.indexOf(draft.skinId == null ? SKIN_DEFAULT : draft.skinId)),
                 i -> draft.skinId = skinIds.get(i)));
         skinPick.setBounds(x + half + 6, rowY2, half, NumenStyle.CONTROL_H);
-        ry = rowY2 + NumenStyle.ROW_PITCH + 4;
+        ry = rowY2 + NumenStyle.ROW_PITCH;
+        // 声线这一格的空态说明:库空 = 没有可选项;总开关关着 = 选了也不出声(新同伴
+        // 会绑上声线,却一直沉默——界面上一切正常,这是最难查的一种)。
+        voiceHint = null;
+        voiceHintY = -1;
+        if (voiceEntries.isEmpty()) {
+            voiceHint = t(ModLanguageData.Keys.SUMMON_VOICE_HINT_EMPTY);
+        } else if (!VoiceLibrary.instance().enabled()) {
+            voiceHint = t(ModLanguageData.Keys.SUMMON_VOICE_HINT_OFF);
+        }
+        if (voiceHint != null) {
+            voiceHintX = x;        // 整行宽:半行装不下"去哪儿配"那半句
+            voiceHintW = w;
+            voiceHintY = ry - 3;   // 紧贴下拉底缘,占的是它下面那点空
+            ry += 10;              // 说明行占一行:下面的行整体让位,谁都别压谁
+        }
+        ry += 4;
 
         alert = ui.add(new InlineAlert());
         alert.setBounds(x, y + 14, w, 24);
@@ -228,6 +245,11 @@ public final class SummonPanel {
                             t(draft.creative ? ModLanguageData.Keys.SUMMON_MODE_CREATIVE
                                     : ModLanguageData.Keys.SUMMON_MODE_SURVIVAL)),
                     modeBoxX + 5, modeBoxY + (NumenStyle.CONTROL_H - s.lineHeight()) / 2 + 1,
+                    c.textMuted(), false);
+        }
+        if (voiceHint != null) {
+            // 空态说明画在声线下拉正下方(它占的那一行已在 build 里让出来了)
+            s.drawText(TextClip.fit(s, voiceHint, voiceHintW), voiceHintX, voiceHintY,
                     c.textMuted(), false);
         }
         ui.render(s, c, mouseX, mouseY, nowMs);

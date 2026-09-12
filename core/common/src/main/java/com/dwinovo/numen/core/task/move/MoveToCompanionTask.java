@@ -9,6 +9,9 @@ import com.dwinovo.numen.core.pathing.calc.NavGoal;
 import com.dwinovo.numen.core.pathing.execute.PlayerNav;
 import com.dwinovo.numen.core.task.base.AbstractCompanionTask;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -62,6 +65,14 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
      *  up — long enough for the body to passively drift onto a reachable underwater target,
      *  short enough to bail under an out-of-reach above-water one. */
     private static final int MAX_SETTLE_TICKS = 60;
+    /** 活目标"到了":离它这么近就算并肩。与 follow 的默认 3 米同一量级——都是"在旁人看来在一起"。 */
+    private static final double LIVE_ARRIVE_RADIUS = 2.5;
+    /**
+     * "计划不推进"的容忍刻数(2 秒)。活目标的读数过期了、而计划同时又不推进,才丢掉计划
+     * 重开;人只是走开了的话,{@link PlayerNav} 自己的软重根(目标中心挪 2 格以上)更顺,
+     * 任务层不该再插一脚——那会变成一次没必要的急停。
+     */
+    private static final int STALE_REPLAN_GRACE_TICKS = 40;
 
     private final int bx;
     private final int by;
@@ -78,8 +89,24 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     /** FIND(就近方块)子系统:扫描/入册/契约/轮换全在组件里,此处只驱动。 */
     private NearestBlockFinder finder;
 
-    /** 船腿:开工时坐在船上就先驾船,靠岸(或搁浅)后接步行。null = 没有/已交棒。 */
-    private com.dwinovo.numen.core.pathing.execute.BoatNav boatLeg;
+    /**
+     * 船腿(见 {@link BoatCrossing}):坐在船上先驾船,或者岸上放船渡过去,靠岸后接步行。
+     * null = 没有/已交棒。
+     */
+    private BoatCrossing crossing;
+    /**
+     * 这件活已经试过一次船腿。<b>一票制</b>:船腿不成(没船、放不下、上不去、搁浅)就回到
+     * 步行/游泳这条既有的路,不再重试——同一片水面第二次也放不下,而重试只会让她在岸边打转。
+     */
+    private boolean boatTried;
+    /** 船腿没成的原因,收尾文案里如实带上。"" = 没试过或者成了。 */
+    private String boatNote = "";
+
+    // ---- 活目标(Kind.ENTITY)。见 LiveTarget:坐标是事件,不是状态。 ----
+    /** 最近一次解析到的目标实体;null = 解析不到(离线/没了/换层)。 */
+    private Entity liveTarget;
+    /** 当前这次规划所依据的那份读数——用于判"过期了该重新解析"({@link LiveTarget#stale})。 */
+    private LiveTarget.Fix liveFix;
 
     public MoveToCompanionTask(NumenPlayer player, MoveToTaskRecord record) {
         super(player, record);
@@ -91,22 +118,27 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
 
     @Override
     protected void onStart() {
-        // 载具处置:坐在船上且有明确去处,先驾船——船腿走到离目标最近的水格,
-        // 靠岸后接步行(见 tickBoatLeg)。其余情况(矿车没有舵、马的寻路仍按步行
-        // 物理算、FIND 要先扫描)直接走步行段;下座驾是步行导航自己的事(PlayerNav)。
-        if (player.isPassenger()
-                && player.getVehicle() instanceof net.minecraft.world.entity.vehicle.Boat
-                && (r.kind == MoveToTaskRecord.Kind.BLOCK || r.kind == MoveToTaskRecord.Kind.COLUMN)
-                && !reached()) {
-            boatLeg = new com.dwinovo.numen.core.pathing.execute.BoatNav(player, blockTarget);
-            long extra = Math.min(MAX_EXTRA_TICKS,
-                    600 + (long) (repDistance() * TICKS_PER_BLOCK));
-            r.extendDeadlineTo(player.level().getGameTime() + extra);
-            leaseCapGameTime = player.level().getGameTime() + CHECK_IN_CAP_TICKS;
-            com.dwinovo.numen.core.Constants.LOG.info(
-                    "[numen-task] goto start kind={} target={},{},{} 驾船先行",
-                    r.kind, bx, by, bz);
+        // 活目标先看清它在不在:离线/换层要在建导航<i>之前</i>就说清楚。拿一份旧坐标
+        // 硬走是这条活最坏的收场——走到了,人不在,而回执还说"到了"。
+        if (r.isLive() && !refreshLiveTarget()) {
             return;
+        }
+        // 载具处置,两条:
+        //  1. 坐在船上且有明确去处 → 直接驾船渡水(原有行为,一字未改);
+        //  2. 没坐船、但这一路被一片开阔水面横着 → 走到岸边放船、上船、渡过去
+        //     (见 BoatCrossing;大水域不会让步行 A* 失败,只会让它很慢,所以这个
+        //     决定只能由跨度主动判出来)。
+        // 其余情况(矿车没有舵、马的寻路仍按步行物理算、FIND 要先扫描、活目标没有
+        // 固定终点)直接走步行段;下座驾是步行导航自己的事(PlayerNav)。
+        if (!reached() && hasFixedDestination()) {
+            if (player.isPassenger()
+                    && player.getVehicle() instanceof net.minecraft.world.entity.vehicle.Boat) {
+                startCrossing(BoatCrossing.aboard(player, blockTarget, terrain()));
+                return;
+            }
+            if (maybeLaunchBoat()) {
+                return;
+            }
         }
         if (r.kind == MoveToTaskRecord.Kind.FIND) {
             // 就近方块:解析 id → 离线扫描附近候选;导航等首批候选到手再建
@@ -157,6 +189,9 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
                 ? PlayerNav.to(player, this::blockCompiled, WALK_SPEED, this::reached, terrain())
                 : PlayerNav.toGoal(player, this::goal, WALK_SPEED, this::reached, terrain()))
                 .withTerrainProbe();
+        // 活目标:把"这次规划依据的那份读数"记下来。此后每刻拿它和实时位置比,
+        // 差了超过 LiveTarget.MAX_DRIFT 格(或者放了太久)就重新解析、重开导航。
+        snapshotLiveFix();
         com.dwinovo.numen.core.Constants.LOG.info(
                 "[numen-task] goto start kind={} target={},{},{} solid={}",
                 r.kind, bx, by, bz,
@@ -165,12 +200,22 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         // box sits on the real target — e.g. a BLOCK goal under/over water that the path can
     }
 
-    /** The navigation goal for this move's kind. */
+    /**
+     * The navigation goal for this move's kind.
+     *
+     * <p>活目标那一支<b>每 tick 现读一次</b>(返回的目标格取的都是此刻的位置):
+     * 建成一次就再不更新的目标格,正是"她朝主人之前站的地方走"的病根。
+     * 返回 null(目标这一刻解析不到)由 {@code PlayerNav} 当 TARGET_LOST 处理——
+     * 不过正常情况下走不到那儿:{@link #refreshLiveTarget()} 已经先一步如实报过。
+     */
     private NavGoal goal() {
         return switch (r.kind) {
             case BLOCK -> blockGoal();
             case COLUMN -> NavGoal.column(bx, bz);
             case YLEVEL -> NavGoal.yLevel(by);
+            case ENTITY -> liveTarget == null
+                    ? null
+                    : NavGoal.near(liveTarget.blockPosition(), LIVE_ARRIVE_RADIUS);
             case FIND -> finder.contract() == null ? null : finder.contract().goal();
         };
     }
@@ -227,12 +272,16 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
 
     /** ONE membership definition per kind, shared with the search:
      *  BLOCK (cell == target per arrival mode), COLUMN (x/z match),
-     *  YLEVEL (y match + on the ground). */
+     *  YLEVEL (y match + on the ground), ENTITY (within {@link #LIVE_ARRIVE_RADIUS}
+     *  of where that one IS right now — read live, never a snapshot). */
     private boolean inGoalCell(BlockPos cell) {
         return switch (r.kind) {
             case BLOCK -> blockGoal().isAt(cell);
             case COLUMN -> cell.getX() == bx && cell.getZ() == bz;
             case YLEVEL -> cell.getY() == by && player.onGround();
+            case ENTITY -> liveTarget != null
+                    && Vec3.atCenterOf(cell).distanceToSqr(liveTarget.position())
+                            <= LIVE_ARRIVE_RADIUS * LIVE_ARRIVE_RADIUS;
             case FIND -> finder.contract() != null && finder.contract().goal().isAt(cell);
         };
     }
@@ -242,8 +291,13 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         // reached() is checked BEFORE the nav==null guard so an already-at-target start
         // (which never builds a nav) lands on SUCCESS rather than the defensive FAILED.
         if (reached()) return TaskState.SUCCESS;
-        if (boatLeg != null) {
-            return tickBoatLeg();
+        if (crossing != null) {
+            return tickCrossing();
+        }
+        // 活目标:每刻先问一次"它此刻在哪、还在不在"。不存在了(离线/换层/没了)就如实
+        // 收场,不拿旧坐标硬走;还在但手上的读数过期了,就重新解析并重开导航。
+        if (r.isLive() && !refreshLiveTarget()) {
+            return TaskState.FAILED;
         }
         if (r.kind == MoveToTaskRecord.Kind.FIND && nav == null) {
             TaskState pre = tickFindDiscovery();
@@ -295,15 +349,19 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
                 }
                 // Otherwise: as close as the terrain allows → (teaching) success or fail.
                 if (closeEnoughToSucceed()) yield TaskState.SUCCESS;
+                // 只走不改地打不通时,再问一次"是不是该用船":开阔水面是<b>可游</b>的,
+                // 于是"路被水挡住"在寻路里往往表现为"没有路",而船能过去。只问一次
+                // (见 boatTried)——第二次答案还是同一个。
+                if (hasFixedDestination() && !boatTried && tryBoatInstead()) {
+                    yield TaskState.RUNNING;
+                }
                 // Recovery ladder — ONE retry rung, land nav only: re-plan accepting
                 // anywhere within NEAR_SUCCESS_RADIUS of the destination. Goal-consistent,
                 // not scope creep: a stop within that radius already counts as arrival
                 // (closeEnoughToSucceed above), the retry just lets the SEARCH aim for it.
                 // YLEVEL has no looser near-equivalent (its goal is already any-x/z), and
                 // the water-settle path above is untouched.
-                if (!nearRetried && !player.isInWater()
-                        && r.kind != MoveToTaskRecord.Kind.YLEVEL
-                        && r.kind != MoveToTaskRecord.Kind.FIND) {
+                if (!nearRetried && !player.isInWater() && hasFixedDestination()) {
                     nearRetried = true;
                     stopNav();
                     NavGoal retry = nearRetryGoal();
@@ -322,39 +380,206 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     }
 
     /**
-     * 船腿的一刻:驾船朝目标推进,终态(靠岸或搁浅)都走同一条接力——到不了目标的
-     * 水路不算失败,只是"这条腿到此为止",剩下的路归步行段(步行导航起步自会下船)。
-     * 目标就在水上时她留在船里,不往水里跳。船留在原地,那是她的船,不是垃圾。
+     * 起一次船腿(岸上放船,或者已经在船上直接渡水)。预算与租约同步行段一个制式:
+     * 船腿也是一段真路程,deadline 得跟着它延长。
      */
-    private TaskState tickBoatLeg() {
+    private void startCrossing(BoatCrossing c) {
+        crossing = c;
+        boatTried = true;   // 一票制:船腿只起一次,不成的路第二条船也走不通
+        long extra = Math.min(MAX_EXTRA_TICKS, 600 + (long) (repDistance() * TICKS_PER_BLOCK));
+        r.extendDeadlineTo(player.level().getGameTime() + extra);
+        leaseCapGameTime = player.level().getGameTime() + CHECK_IN_CAP_TICKS;
+    }
+
+    /**
+     * 船腿的一刻。两种终态分两路:
+     * <ul>
+     *   <li><b>靠岸</b>——已经在目标处就收工,否则接步行段走完最后一段;</li>
+     *   <li><b>没成</b>(没船 / 放不下 / 上不去 / 搁浅 / 半路被打断)——同样接步行段:
+     *       到不了目标的船腿不是失败,只是"这条腿到此为止",剩下的路她可以绕、可以游。
+     *       原因写进 {@link #boatNote},随结果一起交给模型——<b>没坐成船这件事也得说出来</b>,
+     *       不然主人只看到她慢吞吞游过去,不知道中间发生过什么。</li>
+     * </ul>
+     * 船留在原地(收桨不回推),那是她的船,不是垃圾。下船是步行导航自己的事:
+     * {@code PlayerNav.tick()} 起步就把乘客放下来。
+     */
+    private TaskState tickCrossing() {
         // 船腿的续约与步行段同一制式:还在消耗航线就把期限保持在租约窗口里
-        if (boatLeg.progressing() && leaseCapGameTime > 0) {
+        if (crossing.progressing() && leaseCapGameTime > 0) {
             long now = player.level().getGameTime();
             r.extendDeadlineTo(Math.min(now + PROGRESS_LEASE_TICKS, leaseCapGameTime));
         }
-        var status = boatLeg.tick();
-        if (status == com.dwinovo.numen.core.pathing.execute.BoatNav.Status.RUNNING) {
+        BoatCrossing.Status status = crossing.tick();
+        if (status == BoatCrossing.Status.RUNNING) {
             return TaskState.RUNNING;
         }
-        String how = status == com.dwinovo.numen.core.pathing.execute.BoatNav.Status.ARRIVED
-                ? "靠岸" : boatLeg.failReason();
-        boatLeg.stop();
-        boatLeg = null;
-        if (reached()) {
+        String why = crossing.failReason();
+        crossing.stop();
+        crossing = null;
+        if (status == BoatCrossing.Status.DONE) {
             com.dwinovo.numen.core.Constants.LOG.info(
-                    "[numen-task] 船腿结束({}),目标已在船下 feet={}", how,
+                    "[numen-task] 船腿靠岸,{} feet={}", reached() ? "目标已在水边" : "接步行",
                     player.blockPosition().toShortString());
-            return TaskState.SUCCESS;
+            if (reached()) {
+                return TaskState.SUCCESS;
+            }
+        } else {
+            boatNote = " (the boat crossing fell through — " + why
+                    + "; I covered the rest on foot)";
+            com.dwinovo.numen.core.Constants.LOG.info(
+                    "[numen-task] 船腿没成({}),接步行 feet={}", why,
+                    player.blockPosition().toShortString());
         }
-        com.dwinovo.numen.core.Constants.LOG.info(
-                "[numen-task] 船腿结束({}),接步行 feet={}", how,
-                player.blockPosition().toShortString());
         startWalkingNav();
         return TaskState.RUNNING;
     }
 
+    // ==================== 船腿(BoatCrossing) ====================
+
+    /**
+     * 开工时问一遍"该不该起船腿"。两个便宜的条件(路程够远、包里有船)先做,再花那次
+     * 水面扫描——绝大多数 goto 走不到扫描这一步,顺序因此有意义。成立就把腿换成船腿。
+     */
+    private boolean maybeLaunchBoat() {
+        if (repDistance() < BoatPlan.MIN_TRIP || !hasBoat()) {
+            // 不起也要说清为什么:她怎么没坐船,只有这行答得出来
+            com.dwinovo.numen.core.Constants.LOG.info("[numen-task] goto 不起船腿:{}",
+                    BoatPlan.decide(repDistance(), 0, hasBoat(), false).why());
+            return false;
+        }
+        return launchBoat(BoatCrossing.survey(player, blockTarget));
+    }
+
+    /**
+     * 步行打不通时的那一次机会:再问一遍"是不是该用船"。开阔水面在寻路里是<b>可游</b>的,
+     * 于是"路被水挡住"往往表现为"没有路",而船能过去。判据见 {@link BoatPlan}。
+     */
+    private boolean tryBoatInstead() {
+        if (!hasBoat()) {
+            return false;
+        }
+        return launchBoat(BoatCrossing.survey(player, blockTarget));
+    }
+
+    /** 判据 → 日志 → 起腿。两个入口(开工时、无路时)共用这一段。 */
+    private boolean launchBoat(BoatCrossing.Survey survey) {
+        BoatPlan.Decision d = BoatPlan.decide(repDistance(), survey.span(), hasBoat(), false);
+        com.dwinovo.numen.core.Constants.LOG.info("[numen-task] goto 渡水判据:{}", d.why());
+        if (!d.useBoat() || !survey.ready()) {
+            return false;
+        }
+        stopNav();
+        startCrossing(BoatCrossing.fromShore(player, blockTarget, terrain(), survey));
+        return true;
+    }
+
+    /** 这次 goto 有固定终点(方块/地点)吗。活目标与 FIND 的终点由它们自己决定。 */
+    private boolean hasFixedDestination() {
+        return r.kind == MoveToTaskRecord.Kind.BLOCK || r.kind == MoveToTaskRecord.Kind.COLUMN;
+    }
+
+    /** 背包里有船吗——任意木种的 {@link net.minecraft.world.item.BoatItem} 都算。 */
+    private boolean hasBoat() {
+        return BoatCrossing.launcherIn(player) != null;
+    }
+
+    // ==================== 活目标(Kind.ENTITY) ====================
+
+    /**
+     * 活目标这一刻还在不在,以及手上那份读数过没过期。返回 false = 已经如实失败收场。
+     *
+     * <p>这是"她朝主人之前站的地方走"那条病根的正门:位置<b>每刻现读</b>(导航目标每次
+     * 重规划都取当下那一格,刷新节拍本来就是每刻),读到的那份还有明文寿命
+     * ({@link LiveTarget#stale});读不到(离线/换层/没了)就三种处境三条路,绝不拿旧坐标
+     * 硬走。寿命到期只在<b>计划同时也不推进</b>时才由本层动手重开——人只是走开的话,
+     * 引擎自己的软重根更快也更顺,见 {@link #STALE_REPLAN_GRACE_TICKS}。
+     */
+    private boolean refreshLiveTarget() {
+        LiveTarget.Presence presence = livePresence();
+        if (presence != LiveTarget.Presence.HERE) {
+            fail(liveUnavailableMessage(presence), FailureType.TARGET_LOST);
+            return false;
+        }
+        Entity e = liveTarget;
+        if (nav == null) {
+            return true;   // 还没建导航:startWalkingNav 会顺手记下这份读数
+        }
+        long now = player.level().getGameTime();
+        if (nav.stallTicks() > STALE_REPLAN_GRACE_TICKS
+                && LiveTarget.stale(liveFix, e.getX(), e.getY(), e.getZ(), now)) {
+            // 计划不推进,而它所依据的读数也过期了:这条计划瞄着的已经不是目标此刻的位置,
+            // 引擎自己重试多少遍都到不了。丢掉它、按此刻的位置重新解析,并把这句写进日志
+            // (看得见她才好在"跟丢了"的时候知道是刷新慢了还是别的)
+            com.dwinovo.numen.core.Constants.LOG.debug(
+                    "[numen-task] 活目标读数过期(差 {} 格)且计划连着 {} 刻没推进,重新解析 {}",
+                    String.format("%.1f", Math.sqrt(
+                            LiveTarget.driftSqr(liveFix, e.getX(), e.getY(), e.getZ()))),
+                    nav.stallTicks(), e.getName().getString());
+            rebuildLiveNav(e, now);
+        }
+        return true;
+    }
+
+    /**
+     * 解析活目标这一刻的处境。三种处境各走各的路——把它们压成"有/没有"两种,
+     * 就会出现"主人进了下界,她站在原地等他回来"这种把跨维度当成离线处理的僵局。
+     */
+    private LiveTarget.Presence livePresence() {
+        if (r.owner) {
+            Entity owner = player.resolveOwnerPlayer();
+            liveTarget = owner;
+            return LiveTarget.presence(owner != null,
+                    owner != null && owner.level() == player.level());
+        }
+        Entity e = r.entityId == null ? null : ((ServerLevel) player.level()).getEntity(r.entityId);
+        if (e != null && (e.isRemoved() || e == player)) {
+            e = null;
+        }
+        // id 对上还不够:重启之后同一个号可能发给了别的东西(身份看 UUID)
+        if (e != null && r.targetUuid != null && !r.targetUuid.equals(e.getUUID())) {
+            e = null;
+        }
+        liveTarget = e;
+        return LiveTarget.presence(e != null, true);
+    }
+
+    /** 活目标够不着时的人话。三种处境三种说法,都不许含糊成"到不了"。 */
+    private String liveUnavailableMessage(LiveTarget.Presence presence) {
+        String who = r.owner ? "my owner" : ("entity " + r.entityId);
+        if (presence == LiveTarget.Presence.ELSEWHERE) {
+            Entity e = liveTarget;
+            return "can't walk to " + who + ": they are in "
+                    + (e == null ? "another dimension" : e.level().dimension().location().toString())
+                    + " while I am in " + player.level().dimension().location().toString()
+                    + " — a walk cannot cross dimensions. Use a portal (or ask for another"
+                    + " job); I will not walk to where they used to be.";
+        }
+        return "can't walk to " + who + ": " + (r.owner
+                ? "my owner is offline right now"
+                : "that entity is gone from the loaded area (killed, unloaded, or the id was"
+                        + " reissued)") + " — there is no position to walk to.";
+    }
+
+    /** 重新解析并重开导航(活目标读数过期时)。 */
+    private void rebuildLiveNav(Entity e, long now) {
+        stopNav();
+        nav = PlayerNav.toGoal(player, this::goal, WALK_SPEED, this::reached, terrain())
+                .withTerrainProbe();
+        liveFix = new LiveTarget.Fix(e.getX(), e.getY(), e.getZ(), now);
+    }
+
+    /** 把"这次规划依据的那份读数"记成此刻的位置;没有活目标就是空操作。 */
+    private void snapshotLiveFix() {
+        if (r.isLive() && liveTarget != null) {
+            liveFix = new LiveTarget.Fix(liveTarget.getX(), liveTarget.getY(), liveTarget.getZ(),
+                    player.level().getGameTime());
+        }
+    }
+
     /** The retry rung's loosened goal — the destination widened to the SAME radius that
-     *  already counts as arrival ({@link #NEAR_SUCCESS_RADIUS}), never wider. */
+     *  already counts as arrival ({@link #NEAR_SUCCESS_RADIUS}), never wider.
+     *  <b>固定终点专用</b>:活目标没有"再宽一点的那个地方",它每一刻都在别处
+     *  ({@link #goal} 自己就是活的),拿它的 dx/dz(=0)去凑一个半径毫无意义。 */
     private NavGoal nearRetryGoal() {
         if (r.kind == MoveToTaskRecord.Kind.BLOCK) {
             return NavGoal.near(blockTarget, NEAR_SUCCESS_RADIUS);
@@ -389,6 +614,9 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         return switch (r.kind) {
             case BLOCK, COLUMN -> horizontalDistSqr(bx, bz) <= NEAR_SUCCESS_RADIUS * NEAR_SUCCESS_RADIUS;
             case YLEVEL -> Math.abs(feet().getY() - by) <= 1;
+            // 活目标:够到"就快到手"的那个半径也算到(与固定终点同一条线)。判的是
+            // 它此刻的位置,不是当初受理时那个坐标。
+            case ENTITY -> repDistance() <= NEAR_SUCCESS_RADIUS;
             // FIND 候选众多,失败梯已在候选间轮换过,不设贴近成功档
             case FIND -> false;
         };
@@ -406,6 +634,16 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
             case BLOCK -> Math.sqrt(player.distanceToSqr(bx + 0.5, by, bz + 0.5));
             case COLUMN -> Math.sqrt(horizontalDistSqr(bx, bz));
             case YLEVEL -> Math.abs(player.getY() - by);
+            // 活目标:问它此刻在哪。解析不到时退到"手上那份读数"——那只影响预估与
+            // 文案里的距离,不影响判定(够不着的三种处境已经先一步如实报过)
+            case ENTITY -> {
+                Entity e = liveTarget;
+                if (e != null) {
+                    yield Math.sqrt(player.distanceToSqr(e.position()));
+                }
+                LiveTarget.Fix f = liveFix;
+                yield f == null ? 0 : Math.sqrt(player.distanceToSqr(f.x(), f.y(), f.z()));
+            }
             case FIND -> {
                 BlockPos n = finder.nearest();
                 yield n == null ? NearestBlockFinder.BUDGET_BLOCKS
@@ -444,12 +682,25 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         data.put("final_y", player.getY());
         data.put("final_z", player.getZ());
         data.put("ground_y", gy);
+        // 她有没有真的坐船走这一趟,是"回放刚才那段路"时最容易被怀疑的一环,如实带出来
+        if (boatTried) {
+            data.put("boat_leg", boatNote.isEmpty() ? "crossed by boat" : boatNote.strip());
+        }
         return data;
     }
 
-    /** Success copy — always names the real position so the model learns the terrain. */
+    /**
+     * Success copy — always names the real position so the model learns the terrain.
+     *
+     * <p>{@link #boatNote} 挂在最后:船腿没成、她改走/游过去时,这份回执必须说得出
+     * 中间发生过什么("没坐成船"本身就是一个结论)。
+     */
     @Override
     protected String successMessage() {
+        return arrivalMessage() + boatNote;
+    }
+
+    private String arrivalMessage() {
         int gy = player.blockPosition().getY();
         return switch (r.kind) {
             case BLOCK -> {
@@ -475,13 +726,36 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
                         : "arrived beside " + r.block + " at " + n.getX() + "," + n.getY()
                                 + "," + n.getZ() + " — within reach to use.";
             }
+            // 活目标:报的是此刻的相对位置,不印坐标——那份坐标下一秒就作废,印出来
+            // 只会让下一轮拿它当"主人现在在哪"的答案(这正是这条 bug 的老路)
+            case ENTITY -> liveTarget == null
+                    ? "arrived next to " + liveTargetName() + "."
+                    : "reached " + liveTargetName() + " — standing "
+                            + String.format("%.1f", repDistance()) + " blocks from them.";
         };
+    }
+
+    /** 活目标的人话名字(收尾文案用;主人不带 id)。 */
+    private String liveTargetName() {
+        if (r.owner) {
+            return "my owner";
+        }
+        Entity e = liveTarget;
+        return e != null ? e.getName().getString() : ("entity#" + r.entityId);
     }
 
     @Override
     protected String timeoutMessage() {
         int gy = player.blockPosition().getY();
         double remaining = repDistance();
+        if (r.isLive()) {
+            // 活目标不印坐标:它已经动了,印出来的只会被当成"他现在在哪"
+            return "timed out " + String.format("%.1f", remaining) + " blocks from "
+                    + liveTargetName() + " (now at " + bx(gy) + "); I was still closing the"
+                    + " distance when the check-in budget ran out — call goto entity again to"
+                    + " resume the chase, or follow them instead so I keep up on my own."
+                    + boatNote;
+        }
         // Two different stories for the model: a stall (progress dried up — something is
         // wrong, reconsider) vs a check-in (journey healthy but longer than the cap —
         // resuming is the right move).
@@ -497,7 +771,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
 
     @Override
     protected String cancelledMessage() {
-        return "cancelled before reaching target";
+        return "cancelled before reaching target" + boatNote;
     }
 
     private String bx(int gy) {
@@ -512,9 +786,9 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         if (finder != null) {
             finder.cancelScan();
         }
-        if (boatLeg != null) {
-            boatLeg.stop();   // 中途被取消/让位:收桨,别让船带着按下的前进键漂走
-            boatLeg = null;
+        if (crossing != null) {
+            crossing.stop();   // 中途被取消/让位:收桨,别让船带着按下的前进键漂走
+            crossing = null;
         }
     }
 
@@ -528,6 +802,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
             case BLOCK, COLUMN -> "location x=" + bx + " z=" + bz;
             case YLEVEL -> "elevation y=" + by;
             case FIND -> "the nearest " + r.block;
+            case ENTITY -> liveTargetName();
         };
         // 地形封路的验尸自带下一步(清单 + 重发提示),不再叠几何建议;其余无路才是
         // 几何问题:换近一点的路点或扫描。除非她只是没有垫路的料——读起来同样是死路,
@@ -540,6 +815,6 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
             }
         }
         return "blocked: got within " + String.format("%.1f", remaining) + " blocks of " + where
-                + " (now on the ground at y=" + gy + "). " + failReason + "." + advice;
+                + " (now on the ground at y=" + gy + "). " + failReason + "." + advice + boatNote;
     }
 }

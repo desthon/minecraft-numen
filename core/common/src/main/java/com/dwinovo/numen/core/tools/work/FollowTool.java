@@ -41,17 +41,22 @@ public final class FollowTool implements NumenTool {
     @Override
     public String description() {
         return "Tag along with someone, following them wherever they go — your owner by "
-                + "default, or any entity you name. This is a STANDING job: there is nothing "
-                + "to finish, so you will keep at it until you are given something else to do. "
-                + "Use it when the owner asks you to come along or stick close, or to shadow a "
-                + "particular mob or player. You go quiet while you are already beside them. "
-                + "Following a named entity ends by itself if that entity dies or leaves the "
-                + "loaded area; following your owner just waits when they log off. TERRAIN: by "
-                + "default she never breaks or places a block to keep up. When the only way to "
-                + "them would need digging, bridging or pillaring, following ENDS with a failure "
-                + "that lists exactly which blocks; if altering them is acceptable, re-send follow "
-                + "with may_alter_terrain=true (ask the owner when it is not obviously natural "
-                + "terrain).";
+                + "default, or any entity you name. Their position is re-read every tick, so "
+                + "this is what to reach for when the owner says 'come with me' / 'stay with me': "
+                + "never take a coordinate from an earlier get_owner_status and hand it to goto "
+                + "— that number is where they were when you read it. This is a STANDING job: "
+                + "there is nothing to finish, so you will keep at it until you are given "
+                + "something else to do. Use it when the owner asks you to come along or stick "
+                + "close, or to shadow a particular mob or player (for 'come here once and then "
+                + "do X', goto with entity:'owner' is the bounded version). You go quiet while "
+                + "you are already beside them. Following a named entity ends by itself if that "
+                + "entity dies or leaves the loaded area; following your owner just waits when "
+                + "they log off, and ENDS with a clear reason if they are in another dimension "
+                + "(walking cannot cross one). TERRAIN: by default she never breaks or places a "
+                + "block to keep up. When the only way to them would need digging, bridging or "
+                + "pillaring, following ENDS with a failure that lists exactly which blocks; if "
+                + "altering them is acceptable, re-send follow with may_alter_terrain=true (ask "
+                + "the owner when it is not obviously natural terrain).";
     }
 
     @Override

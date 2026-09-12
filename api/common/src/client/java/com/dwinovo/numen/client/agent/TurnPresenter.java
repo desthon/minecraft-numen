@@ -3,12 +3,15 @@ package com.dwinovo.numen.client.agent;
 import com.dwinovo.numen.agent.llm.ProviderMarkup;
 import com.dwinovo.numen.client.chat.ChatDisplayModes;
 import com.dwinovo.numen.client.chat.ChatLines;
+import com.dwinovo.numen.client.voice.VoiceFailureNotice;
 import com.dwinovo.numen.client.voice.VoiceLibrary;
 import com.dwinovo.numen.client.voice.VoicePipeline;
+import com.dwinovo.numen.data.ModLanguageData;
 import com.dwinovo.numen.platform.Services;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.resources.language.I18n;
 
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
@@ -61,6 +64,14 @@ final class TurnPresenter {
     private String lastStreamedPartial = "";
     /** 上次发给服务端的说话状态(翻转才发包,不逐 tick 刷)。 */
     private boolean lastSpeakingSent;
+
+    /**
+     * "取不到声线"这条提醒的节流闸门(与合成失败共用 {@link VoiceFailureNotice} 的口径:
+     * 成因 + 冷却,换成因立刻再说)。没有它,一段对话十几轮就是十几条一模一样的提醒。
+     */
+    private final VoiceFailureNotice silenceNotice = new VoiceFailureNotice();
+    /** 上一轮她还出得了声。用来认出"配置刚变哑"的那一刻——那是新状态,该说就说,别等冷却。 */
+    private boolean voiceWasLive;
 
     TurnPresenter(UUID entityUuid, BooleanSupplier streamingActive, BooleanSupplier turnBusy,
                   IntSupplier generation, Supplier<String> personaName) {
@@ -165,14 +176,52 @@ final class TurnPresenter {
         VoiceLibrary.Entry cfg = VoiceLibrary.instance().resolve(entityUuid);
         if (cfg == null) {
             if (voice != null) voice.interrupt();   // 总开关关闭/解绑:静音存量队列
+            reportSilentVoice();                    // 不是"无声就没说的":成因要上聊天框
             return SILENT_VOICE;
         }
+        voiceWasLive = true;
         if (voice == null) {
             voice = new VoicePipeline(entityUuid);
         }
         final var vp = voice;
         final int vgen = vp.beginTurn(cfg, ownerBargeIn);
         return new VoiceTurn(vp.chunkSink(vgen), () -> vp.endTurn(vgen));
+    }
+
+    /**
+     * 取音色这一趟没拿到声线时,给主人的一条提醒——静默失败的最后一块。
+     *
+     * <p>只对<b>配置性成因</b>说话:总开关关着、绑定悬空(原来那一条被删了)。这两种
+     * 都是"她本该出声却一声不响,而界面上一切正常",主人查无可查。
+     * {@code NO_BINDING}(从没配过声线)是默认状态而不是故障——每个没配 TTS 的同伴
+     * 每次开口都提醒一句,那就成了噪音,所以它<b>刻意不报</b>。
+     *
+     * <p>节流与合成失败同一口径({@link VoiceFailureNotice}):同一成因第一次立刻说,
+     * 之后最多每分钟一条;成因变了(开关开/关、绑定从有到无)立刻又能说。
+     * 配置刚从"能出声"变成"哑了"时还会把闸门重置一次——那时主人正盯着屏幕等反应,
+     * 让他等满冷却才被告知就白说了。
+     */
+    private void reportSilentVoice() {
+        VoiceLibrary.Muted why = VoiceLibrary.instance().mutedReason(entityUuid);
+        if (why == null) {
+            return;   // 其实有可用声线(判据若有漂移,这里不冤枉人)
+        }
+        if (voiceWasLive) {
+            silenceNotice.reset();   // 刚变哑:新状态,立刻说一次
+            voiceWasLive = false;
+        }
+        String key = switch (why) {
+            case SWITCH_OFF -> ModLanguageData.Keys.VOICE_SILENT_OFF;
+            case ENTRY_GONE -> ModLanguageData.Keys.VOICE_SILENT_DANGLING;
+            // 没配过声线 = 默认状态,不是故障:不吵(见方法注释)
+            case NO_BINDING -> null;
+        };
+        if (key == null) {
+            return;
+        }
+        if (silenceNotice.shouldShow(why.name(), System.currentTimeMillis())) {
+            ChatLines.notice(speakerName(), I18n.get(key));
+        }
     }
 
     /** 语音闭嘴:停播 + 清队列(打断/死亡)。 */
@@ -182,11 +231,16 @@ final class TurnPresenter {
 
     /**
      * 外接大脑的整段发声(say):按当前绑定现取声线,整段排到播放队尾——
-     * 不开新轮、不清存量,连续的 say 自然连播。未绑声线 = 静默(气泡与聊天行照旧)。
+     * 不开新轮、不清存量,连续的 say 自然连播。没配过声线 = 静默(气泡与聊天行照旧);
+     * 配过却出不了声(开关关着/绑定悬空)则与流式那条路同一口径给一次提醒。
      */
     void sayExternal(String text) {
         VoiceLibrary.Entry cfg = VoiceLibrary.instance().resolve(entityUuid);
-        if (cfg == null) return;
+        if (cfg == null) {
+            reportSilentVoice();   // 外接大脑的 say 走同一口径:该出声没出声,得说清为什么
+            return;
+        }
+        voiceWasLive = true;
         if (voice == null) voice = new VoicePipeline(entityUuid);
         // 整段开说没有"半截记号"的问题(文本已经收完了),整段剥即可;
         // 聊天行与气泡那一份由 EntityAgentLoop.externalSay 走呈现口剥离。
