@@ -140,6 +140,7 @@ dependencies {
     // 类与资源由下面的 jar 块平铺进发行 jar。
     compileOnly project(':plugins:ysm')
     compileOnly project(':plugins:tlm')
+    compileOnly project(':plugins:litematica')
 
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
     // refmap 由 mixin 注解处理器在编译期生成——AP 必须显式挂上,否则 mixin 照样编译
@@ -227,4 +228,5 @@ tasks.named('jar', Jar) {
 tasks.matching { it.name == 'jar' || it.name == 'jarJar' }.configureEach {
     it.from({ project(':plugins:ysm').sourceSets.main.output })
     it.from({ project(':plugins:tlm').sourceSets.main.output })
+    it.from({ project(':plugins:litematica').sourceSets.main.output })
 }

@@ -43,12 +43,34 @@ public final class Gate {
      */
     public void open(String modId, String plugin, Function<Path, Runnable> body) {
         if (!modLoaded.test(modId)) return;
+        install(plugin, modId, body);
+    }
+
+    /**
+     * 按<b>类在不在</b>放行的闸:同一个模组有多个移植体时,mod id 会各写各的,包名不会。
+     *
+     * <p>判据取 {@code initialize=false} —— 只是问类加载器认不认得这个名字,不触发它的静态
+     * 初始化。为真时也不加载目标模组的类:那条路走的是它与我们之间的反射,不是类路径。
+     *
+     * @param className 目标模组的一个公开入口类,如
+     *                  {@code fi.dy.masa.litematica.data.DataManager}
+     */
+    public void openByClass(String className, String plugin, Function<Path, Runnable> body) {
+        try {
+            Class.forName(className, false, Gate.class.getClassLoader());
+        } catch (Throwable absent) {
+            return;
+        }
+        install(plugin, className, body);
+    }
+
+    private void install(String plugin, String what, Function<Path, Runnable> body) {
         try {
             body.apply(skillsRoot(plugin)).run();
-            Constants.LOG.info("[numen] 联动已接上:{}", modId);
+            Constants.LOG.info("[numen] 联动已接上:{}", what);
         } catch (Throwable t) {
             // 一个联动接不上不能带倒整个模组,也不能带倒别的联动
-            Constants.LOG.warn("[numen] 联动 {} 没接上,其余照常:{}", modId, t.toString());
+            Constants.LOG.warn("[numen] 联动 {} 没接上,其余照常:{}", what, t.toString());
         }
     }
 

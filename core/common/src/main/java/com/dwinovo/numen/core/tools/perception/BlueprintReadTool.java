@@ -40,7 +40,7 @@ public final class BlueprintReadTool implements NumenTool {
     /** 按层分布最多报几层,再多就分桶。 */
     private static final int MAX_LAYERS = 24;
 
-    private record Args(String file, Integer x, Integer y, Integer z, Integer rotation) {}
+    private record Args(String file, Integer x, Integer y, Integer z, Integer rotation, String mirror) {}
 
     @Override
     public String name() {
@@ -73,6 +73,9 @@ public final class BlueprintReadTool implements NumenTool {
         // 而整数 enum 会被一部分只认字符串 enum 的上游拒收。
         props.put("rotation", Map.of("type", "integer",
                 "description", "Optional clockwise rotation (0/90/180/270), matching the build you plan."));
+        props.put("mirror", Map.of("type", "string", "enum", List.of("none", "left_right", "front_back"),
+                "description", "Optional mirror (none/left_right/front_back), applied BEFORE the rotation. "
+                        + "Must match the build you plan — a mismatch counts the wrong cells as done."));
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("type", "object");
         root.put("properties", props);
@@ -91,7 +94,8 @@ public final class BlueprintReadTool implements NumenTool {
         BlockPos anchor = anchored ? new BlockPos(a.x(), a.y(), a.z()) : BlockPos.ZERO;
         int quarters = a.rotation() == null ? 0 : Math.floorMod(a.rotation(), 360) / 90;
         ServerLevel level = (ServerLevel) companion.level();
-        BlueprintStore.Loaded loaded = BlueprintStore.load(level, a.file(), anchor, quarters);
+        BlueprintStore.Loaded loaded = BlueprintStore.load(level, a.file(), anchor, quarters,
+                com.dwinovo.numen.core.blueprint.BlueprintOrientation.mirror(a.mirror()));
 
         Map<Item, Integer> cost = new LinkedHashMap<>();
         Map<Integer, Integer> byLayer = new TreeMap<>();

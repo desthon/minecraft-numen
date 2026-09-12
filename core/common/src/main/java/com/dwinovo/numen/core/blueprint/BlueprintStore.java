@@ -14,6 +14,7 @@ import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -122,12 +123,29 @@ public final class BlueprintStore {
     }
 
     /**
-     * 展开蓝图为目标格集。
+     * 展开蓝图为目标格集(不镜像)。
      *
-     * @param anchor           落位基点 = 旋转后结构的最小角(x/y/z 最小处)
+     * @param anchor           落位基点 = 变换后结构的最小角(x/y/z 最小处)
      * @param rotationQuarters 顺时针旋转的四分之一圈数(0-3)
      */
     public static Loaded load(ServerLevel level, String name, BlockPos anchor, int rotationQuarters) {
+        return load(level, name, anchor, rotationQuarters, Mirror.NONE);
+    }
+
+    /**
+     * 展开蓝图为目标格集。
+     *
+     * <p>镜像与旋转<b>先镜像后旋转</b>,顺序与 Litematica 摆放投影时一致(见
+     * {@link BlueprintOrientation})——Litematica 的投影可以镜像,同伴照着投影盖,
+     * 就得盖出同一个样子;只认旋转的话,镜像过的投影会从"塔在左"变成"塔在右",
+     * 而且两半都能对上格数,报告里一句异常都不会有。
+     *
+     * @param anchor           落位基点 = 变换后结构的最小角(x/y/z 最小处)
+     * @param rotationQuarters 顺时针旋转的四分之一圈数(0-3)
+     * @param mirror           镜像方式;{@link Mirror#NONE} 为不镜像
+     */
+    public static Loaded load(ServerLevel level, String name, BlockPos anchor, int rotationQuarters,
+                              Mirror mirror) {
         CompoundTag tag = readTag(level.getServer(), name);
         ListTag sizeTag = tag.getList("size", Tag.TAG_INT);
         int sx = sizeTag.getInt(0);
@@ -142,15 +160,13 @@ public final class BlueprintStore {
             paletteTag = tag.getList("palette", Tag.TAG_COMPOUND);
         }
         List<BlockState> palette = new ArrayList<>(paletteTag.size());
-        Rotation rotation = switch (Math.floorMod(rotationQuarters, 4)) {
-            case 1 -> Rotation.CLOCKWISE_90;
-            case 2 -> Rotation.CLOCKWISE_180;
-            case 3 -> Rotation.COUNTERCLOCKWISE_90;
-            default -> Rotation.NONE;
-        };
+        Rotation rotation = BlueprintOrientation.rotation(rotationQuarters);
         for (int i = 0; i < paletteTag.size(); i++) {
+            // 方块状态与坐标用同一个顺序:镜像在前、旋转在后。反过来的话,
+            // 镜像+旋转的楼梯会朝向反的一侧,而格子位置全对——最难查的一类错位。
             palette.add(NbtUtils.readBlockState(
-                    level.holderLookup(Registries.BLOCK), paletteTag.getCompound(i)).rotate(rotation));
+                            level.holderLookup(Registries.BLOCK), paletteTag.getCompound(i))
+                    .mirror(mirror).rotate(rotation));
         }
 
         ListTag blocks = tag.getList("blocks", Tag.TAG_COMPOUND);
@@ -159,6 +175,9 @@ public final class BlueprintStore {
                     + " cells, exceeding the " + MAX_CELLS + " cap");
         }
         int quarters = Math.floorMod(rotationQuarters, 4);
+        // 变换后的最小角:每个格子减掉它,锚点才落在"整幢东西的最小角"上。
+        // 旋转 90° 会把 x 推到 -z 那一侧,少了这一步有一半会埋到锚点负方向去。
+        int[] shift = BlueprintOrientation.minCorner(sx, sz, mirror, rotation);
         // 按位置去重:多区域的 litematic 可以在同一世界坐标给出两条(常见于一个
         // 区域填空气、另一个填墙)。不去重的话 targetByPos 只留最后一条而 targets
         // 两条都在——报价翻倍、分母虚高,而且必有一条永远对不上,最后以"她站不住"
@@ -192,14 +211,9 @@ public final class BlueprintStore {
             if (com.dwinovo.numen.core.build.BuildStates.isSecondaryHalf(state)) {
                 continue;
             }
-            int rx;
-            int rz;
-            switch (quarters) {
-                case 1 -> { rx = sz - 1 - z; rz = x; }
-                case 2 -> { rx = sx - 1 - x; rz = sz - 1 - z; }
-                case 3 -> { rx = z; rz = sx - 1 - x; }
-                default -> { rx = x; rz = z; }
-            }
+            int[] placedAt = BlueprintOrientation.apply(x, z, mirror, rotation);
+            int rx = placedAt[0] - shift[0];
+            int rz = placedAt[1] - shift[1];
             // 记账用的物品与工具那条入口共用同一张表(耕地/土径算土,高草算矮草)。
             // 推不出物品的方块(带花的花盆之类)整格跳过——留着只会是一个永远付不起
             // 的格子:预检数不到空气,逐格闸门也过不去,最后报"还差 air x37"。
@@ -248,7 +262,9 @@ public final class BlueprintStore {
                 needs.put(world.asLong(), cellNeeds);
             }
         }
-        // 摆设实体(展示框、盔甲架、画):随图纸一起旋转,躯壳照生,身上的东西剥掉
+        // 摆设实体(展示框、盔甲架、画):随图纸一起变换,躯壳照生,身上的东西剥掉。
+        // 实体按浮点坐标落位,包围盒是 [0, 边长] 而不是 0..边长-1 —— 平移量因此差一格
+        double[] entityShift = BlueprintOrientation.minCornerContinuous(sx, sz, mirror, rotation);
         List<BuildTaskRecord.EntitySpawn> spawns = new ArrayList<>();
         for (Tag t : tag.getList("entities", Tag.TAG_COMPOUND)) {
             CompoundTag e = (CompoundTag) t;
@@ -264,14 +280,9 @@ public final class BlueprintStore {
             double ex = at.getDouble(0);
             double ey = at.getDouble(1);
             double ez = at.getDouble(2);
-            double rx;
-            double rz;
-            switch (quarters) {
-                case 1 -> { rx = sz - ez; rz = ex; }
-                case 2 -> { rx = sx - ex; rz = sz - ez; }
-                case 3 -> { rx = ez; rz = sx - ex; }
-                default -> { rx = ex; rz = ez; }
-            }
+            double[] placedAt = BlueprintOrientation.applyContinuous(ex, ez, mirror, rotation);
+            double rx = placedAt[0] - entityShift[0];
+            double rz = placedAt[1] - entityShift[1];
             spawns.add(new BuildTaskRecord.EntitySpawn(
                     anchor.getX() + rx, anchor.getY() + ey, anchor.getZ() + rz, rotation, safe));
         }

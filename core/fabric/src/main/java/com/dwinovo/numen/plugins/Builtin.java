@@ -31,6 +31,18 @@ public final class Builtin {
     public static void registerAll() {
         Gate gate = new Gate(FabricLoader.getInstance()::isModLoaded);
         gate.open("yes_steve_model", "ysm", skills -> () -> YsmOnFabric.install(skills));
+
+        // Litematica 用<b>类</b>判,不用 mod id:两个移植体(Fabric 的 Litematica、Forge 的
+        // Forgematica)mod id 各叫各的,包名是同一个。Fabric 这份装上就是 Litematica 本体。
+        gate.openByClass("fi.dy.masa.litematica.data.DataManager", "litematica",
+                skills -> () -> LitematicaOnClient.install(skills));
+    }
+
+    /** Litematica 联动只写原版,两个加载器上要装的东西一字不差,所以它没有宿主接口。 */
+    private static final class LitematicaOnClient {
+        static void install(Path skills) {
+            com.dwinovo.numen.plugins.litematica.NumenLitematica.install(skills);
+        }
     }
 
     /** YSM 联动只写原版;它要的加载器专属的两件事,Fabric 的答案在这里。 */

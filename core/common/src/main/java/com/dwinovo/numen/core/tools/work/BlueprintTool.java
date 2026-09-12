@@ -27,7 +27,8 @@ public final class BlueprintTool implements NumenTool {
     private static final Gson GSON = new Gson();
     private static final long MIN_TIMEOUT_TICKS = 2 * 60 * 20;
 
-    private record Args(String action, String file, Integer x, Integer y, Integer z, Integer rotation) {}
+    private record Args(String action, String file, Integer x, Integer y, Integer z, Integer rotation,
+                        String mirror) {}
 
     @Override
     public String name() {
@@ -71,6 +72,9 @@ public final class BlueprintTool implements NumenTool {
         // 而整数 enum 会被一部分只认字符串 enum 的上游拒收。
         props.put("rotation", Map.of("type", "integer",
                 "description", "build only: optional clockwise rotation (0/90/180/270), default 0."));
+        props.put("mirror", Map.of("type", "string", "enum", List.of("none", "left_right", "front_back"),
+                "description", "build only: optional mirror, applied BEFORE the rotation (the same order "
+                        + "the Litematica overlay uses), default none. Pass whatever the placement carries."));
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("type", "object");
         root.put("properties", props);
@@ -111,8 +115,11 @@ public final class BlueprintTool implements NumenTool {
             throw new IllegalArgumentException("build needs anchor x, y, z (minimum corner)");
         }
         int quarters = a.rotation() == null ? 0 : Math.floorMod(a.rotation(), 360) / 90;
+        // 镜像名认不出来就当场报错:静默当成"不镜像"盖下去,玩家看到的是一栋镜像过的
+        // 房子,而每一格的报告都是绿的——这是实测里最贵的一类"成功"
+        var mirror = com.dwinovo.numen.core.blueprint.BlueprintOrientation.mirror(a.mirror());
         BlueprintStore.Loaded loaded = BlueprintStore.load((ServerLevel) companion.level(), a.file(),
-                new BlockPos(a.x(), a.y(), a.z()), quarters);
+                new BlockPos(a.x(), a.y(), a.z()), quarters, mirror);
         if (loaded.targets().isEmpty()) {
             throw new IllegalArgumentException("blueprint " + a.file() + " contains no buildable cells");
         }

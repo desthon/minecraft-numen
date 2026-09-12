@@ -34,6 +34,19 @@ public final class Builtin {
         gate.open("touhou_little_maid", "tlm",
                 skills -> () -> com.dwinovo.numen.plugins.tlm.NumenTlm.install(modBus, skills));
         // 注:这个 MC 版本上车万女仆没有按坐标播语音的口,所以那个联动只做模型不做语音。
+
+        // Litematica 用<b>类</b>判,不用 mod id:Forge 上那份移植体叫 Forgematica、
+        // mod id 是 forgematica,而两个移植体的包名是同一个。投影状态只活在客户端,
+        // 所以专用服务器上这个类不在,闸门自然关着。
+        gate.openByClass("fi.dy.masa.litematica.data.DataManager", "litematica",
+                skills -> () -> LitematicaOnClient.install(skills));
+    }
+
+    /** Litematica 联动只写原版,两个加载器上要装的东西一字不差,所以它没有宿主接口。 */
+    private static final class LitematicaOnClient {
+        static void install(Path skills) {
+            com.dwinovo.numen.plugins.litematica.NumenLitematica.install(skills);
+        }
     }
 
     /** YSM 联动只写原版;它要的加载器专属的两件事,Forge 的答案在这里。 */

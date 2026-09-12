@@ -1,0 +1,21 @@
+plugins {
+    id 'numen-plugin'
+    id 'org.spongepowered.gradle.vanilla' version '0.2.1-SNAPSHOT'
+}
+
+// 只写原版 MC 与 numen api,三个加载器都能跑:编译对着原版(VanillaGradle,与 api/common
+// 同一条路),加载器的类物理上不在类路径上,想用也编译不过。
+minecraft { version(minecraft_version) }
+
+dependencies {
+    // 瘦 api jar 取跨加载器那份:与本模块一样只有原版 MC 的类型
+    compileOnly files(project(':api:common').tasks.named('apiJar'))
+}
+
+// Litematica 与它的 Forge 移植 Forgematica 都<b>不</b>引用任何一个类——投影状态全走反射
+// (见 LitematicaBridge 的类注释:同一个模组两个移植体,mod id 还各叫各的 litematica /
+// forgematica,编译期捆死任何一个都是给另一个判死)。所以这里既没有它的 maven 坐标,
+// 也不需要它的仓库。
+//
+// 于是本模块的产物只依赖两样东西:原版类 + 瘦 api jar。这也是它能同时平铺进各加载器
+// 发行 jar 的原因——各自的重映射器认的都是原版名。
