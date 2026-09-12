@@ -51,7 +51,8 @@ tasks.named('sourcesJar', Jar) {
 // 与 api 那边同一条规矩:缺产物就把 datagen 拉进构建,别让空标签的包混出去。
 // 条件取「不存在或空」:被中断的 datagen 会留下空目录,只判存在的话自动补跑不触发,
 // 而把关那一步照样会拦 —— 于是每次构建都失败,却不肯自己跑一次 datagen。
-def generatedReady = { -> def d = file('src/generated/resources'); d.isDirectory() && d.listFiles() }
+// 同 api 侧:判据要问"东西在不在",不是"目录空不空"(被中断的 datagen 只剩 .cache/)。
+def generatedReady = { -> file('src/generated/resources/data').isDirectory() }
 // 任务名要等到 afterEvaluate 才查得到:loom / ForgeGradle 的 datagen 运行配置是在
 // 各自的 build.gradle 后段才注册的,而本脚本是 plugins{} 块里第一个被应用的。
 afterEvaluate {

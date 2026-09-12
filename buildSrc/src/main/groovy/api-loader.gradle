@@ -84,7 +84,9 @@ tasks.named('jar', Jar) {
 // 形状照抄 core/forge 那条 refmap 绞索:坏包不许静默出门。
 // 条件取「不存在或空」:被中断的 datagen 会留下空目录,只判存在的话自动补跑不触发,
 // 而把关那一步照样会拦 —— 于是每次构建都失败,却不肯自己跑一次 datagen。
-def generatedReady = { -> def d = file('src/generated/resources'); d.isDirectory() && d.listFiles() }
+// 判据必须和把关那一步<b>同一件事</b>:语言文件落在 assets/ 下,而被中断的 datagen 会留下
+// .cache/ 却没有 assets/ —— 只看"目录非空"就会以为产物齐了,于是既不补跑、又拦下 jar。
+def generatedReady = { -> file('src/generated/resources/assets').isDirectory() }
 // 任务名要等到 afterEvaluate 才查得到:loom / ForgeGradle 的 datagen 运行配置是在
 // 各自的 build.gradle 后段才注册的,而本脚本是 plugins{} 块里第一个被应用的。
 afterEvaluate {
