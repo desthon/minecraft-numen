@@ -1,6 +1,7 @@
 package com.dwinovo.numen.core.task;
 
 import com.dwinovo.numen.core.task.chain.BreathChain;
+import com.dwinovo.numen.core.task.chain.EatChain;
 import com.dwinovo.numen.core.task.chain.MLGChain;
 import com.dwinovo.numen.core.task.chain.MobDefenseChain;
 import com.dwinovo.numen.core.task.chain.UnstuckChain;
@@ -27,6 +28,7 @@ class ReflexOrderTest {
             new MLGChain(),          // 10 — 正在坠落是最迫近的死法
             new BreathChain(),       // 20 — 淹水是硬计时:先浮上去,打架等会儿
             new MobDefenseChain(),   // 30
+            new EatChain(),          // 40 — 饿了自己吃,但先打完架再吃
             new UnstuckChain());     // 50 — 卡住只是烦人,绝不该压过打架或吃饭
 
     @Test
@@ -48,6 +50,18 @@ class ReflexOrderTest {
     }
 
     @Test
+    void fightingOutranksEating() {
+        // 一边挨打一边坐下啃东西,两件事都做不成
+        assertTrue(indexOf("mob_defense") < indexOf("eat"));
+    }
+
+    @Test
+    void eatingOutranksGettingUnstuck() {
+        // 卡住只是烦人;饿久了要掉血,而且她自己动手吃这件事本来就是"自理"
+        assertTrue(indexOf("eat") < indexOf("unstuck"));
+    }
+
+    @Test
     void gettingUnstuckIsTheLeastUrgent() {
         // 卡住只是烦人,不致命 —— 它绝不该压过打架或吃饭
         assertEquals(ORDER.size() - 1, indexOf("unstuck"));
@@ -55,9 +69,10 @@ class ReflexOrderTest {
 
     @Test
     void theWholeOrderMatchesTheRetiredPriorityNumbers() {
-        // 旧的浮点排序:MLG 10 > 换气 6 > 自卫 5 > 脱困 2
-        // (进食那一条退役了 —— 她不再自己吃,饿了发 urgent 让主人管)
-        assertEquals(List.of("mlg", "breath", "mob_defense", "unstuck"),
+        // 旧的浮点排序:MLG 10 > 换气 6 > 自卫 5 > 进食 4 > 脱困 2
+        // (进食这一条<b>恢复了</b> —— 它曾经整条退役:她不再自己吃,饿了发 urgent 让主人管。
+        //  玩家报告"饿了不会自己吃东西"是 bug,所以按 40 号位重新接上。)
+        assertEquals(List.of("mlg", "breath", "mob_defense", "eat", "unstuck"),
                 ORDER.stream().map(Reflex::id).toList());
     }
 

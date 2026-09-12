@@ -124,6 +124,47 @@ class InventoryBlockTest {
                 new ItemStack(Items.POTION), potion);
     }
 
+    // ==================== 装备的附魔 ====================
+
+    /**
+     * 玩家报的 bug:装备只有个白板名字。锋利五的剑和白板剑在模型眼里长得一模一样,她拿着
+     * 附魔装备当白板去估战力。附魔得出现在<b>每轮都读</b>的这一块里,不能只活在 tooltip。
+     */
+    @Test
+    void enchantmentsAreVisibleOnTheGearSheCarries() {
+        assumeTrue(booted);
+        String block = EntityAgentLoop.renderInventory(snapshot(0, ItemStack.EMPTY, sharpSword()));
+        assertTrue(block.contains("minecraft:diamond_sword[sharpness 5]"), block);
+        assertTrue(block.contains("main minecraft:diamond_sword[sharpness 5]"), block);
+    }
+
+    /** 附魔不同的同类物品不该被并成一堆:它们本来就不是一件东西(合并的是同一个标签)。 */
+    @Test
+    void anEnchantedStackIsNotFoldedIntoThePlainOne() {
+        assumeTrue(booted);
+        String block = EntityAgentLoop.renderInventory(snapshot(0, ItemStack.EMPTY,
+                new ItemStack(Items.DIAMOND_SWORD), sharpSword()));
+        assertTrue(block.contains("minecraft:diamond_sword x1"), block);
+        assertTrue(block.contains("minecraft:diamond_sword[sharpness 5] x1"), block);
+    }
+
+    /** 没有附魔的东西一个字都不多印(标签只在"需要区分"的场合出现)。 */
+    @Test
+    void plainGearKeepsReadingAsBefore() {
+        assumeTrue(booted);
+        String block = EntityAgentLoop.renderInventory(snapshot(0, ItemStack.EMPTY,
+                new ItemStack(Items.DIAMOND_SWORD)));
+        assertTrue(block.contains("minecraft:diamond_sword x1"), block);
+        assertFalse(block.contains("minecraft:diamond_sword["), block);
+    }
+
+    private static ItemStack sharpSword() {
+        ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+        // 1.20.1:附魔在 NBT 里(ItemStack#enchant),组件系统是 1.20.5+ 的。
+        sword.enchant(net.minecraft.world.item.enchantment.Enchantments.SHARPNESS, 5);
+        return sword;
+    }
+
     // ==================== 手上拿的 ====================
 
     @Test

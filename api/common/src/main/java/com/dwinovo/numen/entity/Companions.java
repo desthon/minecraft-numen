@@ -5,9 +5,12 @@ import com.dwinovo.numen.network.payload.NumenDeathPayload;
 import com.dwinovo.numen.network.payload.NumenRespawnPayload;
 import com.dwinovo.numen.network.payload.CompanionListPayload;
 import com.dwinovo.numen.platform.Services;
+import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -227,6 +230,11 @@ public final class Companions {
         MinecraftServer server = body.level().getServer();
         if (server == null) return;
         UUID uuid = body.getUUID();
+        // 死在哪:遗物就掉在那个点。<b>趁早抄下来</b>——她没有客户端,body.position() 就是
+        // 最后同步下来的那一处;而下面还有第三方钩子要跑,尸体本身又在这一 tick 之后被
+        // despawn(身体一离场,它上面的位置就不再是权威)。这个坐标要一直活到复活那一刻。
+        ResourceKey<Level> deathDim = body.level().dimension();
+        BlockPos deathPos = body.blockPosition();
         // 死因取 die() 里抄下的那一句:此刻再问战斗记录已经被 vanilla 清空了,
         // 只会拿到"她死了"这种没有凶手的兜底文案(见 NumenPlayer#deathMessage)。
         String cause = body.deathMessage();
@@ -245,10 +253,11 @@ public final class Companions {
             Services.NETWORK.sendToPlayer(owner, new NumenDeathPayload(uuid, cause));
         }
         CompanionEvents.fire(CompanionEvent.DEATH, body);   // 不发工具结果:那条 tool_call 已由死因结算
-        // Persist the death (cause + game-time) in the world-saved registry so it survives a logout during
-        // the respawn window — without this, a relog lost the pending state and the body silently respawned
-        // "alive" with an empty inventory and no idea it had died.
-        CompanionRegistry.get(server).markDead(uuid, cause, server.overworld().getGameTime());
+        // Persist the death (cause + game-time + where) in the world-saved registry so it survives a
+        // logout during the respawn window — without this, a relog lost the pending state and the body
+        // silently respawned "alive" with an empty inventory and no idea it had died.
+        CompanionRegistry.get(server).markDead(uuid, cause, server.overworld().getGameTime(),
+                deathDim, deathPos);
         // 死亡状态进了注册表,名册才说得出"她还在,只是躺着"——面板的倒计时读这个。
         // 少了这一推,主人在死亡窗口里重登就会看见她凭空消失。
         if (owner != null) {
@@ -278,6 +287,8 @@ public final class Companions {
 
     /** Respawn a dead companion at its owner, clear the death state, and tell the brain it died + why
      *  (the cause rides the respawn payload, so it works even after a logout cleared the client's memory).
+     *  When we know where the body fell, the brain is also told where its dropped items are — see
+     *  {@link #relicNote}.
      *  Returns false when no safe landing spot exists near the owner right now (tight tunnel, crawling,
      *  deep water) — the death state stays pending and the ticker retries until the owner reaches open
      *  space. Spawning anyway wedged the body into blocks: suffocate → die → respawn into the same spot,
@@ -296,7 +307,64 @@ public final class Companions {
         CompanionRegistry.get(server).markAlive(uuid);
         syncRosterToOwner(server, owner);
         Services.NETWORK.sendToPlayer(owner, new NumenRespawnPayload(uuid, entry.deathCause()));
+        // 她刚回到主人身边,而她上一次死掉的东西还躺在别处。那条坐标是复活之后<b>唯一</b>
+        // 说得出口的线索(身体上没有任何东西记得死亡地点,背包也是新的),所以在这儿交给她。
+        noteRelics(server, body, uuid, entry);
         return true;
+    }
+
+    /**
+     * 告诉她遗物掉在哪。<b>复活成功之后、只做一次。</b>
+     *
+     * <p>为什么是一条事件而不是一个任务:回去捡东西要跨维度、要赶路、要判断"那块地方
+     * 还在不在"——那是模型在做的事,给它一个坐标就够,给它一个任务就是替它做决定。
+     * 所以这条<b>不急</b>:攒着搭下一轮的车,不为一句话多烧一次请求。
+     *
+     * <p>说过就清(见 {@link CompanionRegistry#clearDeathPos}):坐标是一次性线索,
+     * 留着的话下一次复活会把同一件旧事当成新的再讲一遍。
+     */
+    private static void noteRelics(MinecraftServer server, NumenPlayer body, UUID uuid,
+                                   CompanionRegistry.Entry entry) {
+        String note = relicNote(entry.deathDim().orElse(null), entry.deathPos().orElse(null),
+                body.level().dimension());
+        if (note == null) {
+            return;
+        }
+        com.dwinovo.numen.event.NumenEvents.body(body, note);
+        CompanionRegistry.get(server).clearDeathPos(uuid);
+    }
+
+    /**
+     * 复活之后该跟大脑说哪句话 —— <b>纯函数</b>,三样东西进,一句话或 {@code null} 出。
+     *
+     * <ul>
+     *   <li>不知道死在哪儿 → {@code null}:什么都不说;</li>
+     *   <li>死在同一维度 → 带上坐标,让她记住、回头去捡;</li>
+     *   <li>死在别的维度 → <b>如实说没去</b>(她是被复活到主人身边来的,东西还留在那一维,
+     *       别让她以为丢了)。</li>
+     * </ul>
+     *
+     * <p>不知道坐标就不说话,而不是说一句含糊的"东西可能在某某附近":凭一个猜出来的地点
+     * 派她跑一趟,比不去更糟——她会到那儿发现什么都没有,再回来把"我捡到了"报成假的。
+     *
+     * @param deathDim 死在哪一维;{@code null} = 不知道(这个字段出现之前的老存档)
+     * @param deathPos 死在哪个点;{@code null} 同上
+     * @param nowDim   她现在在哪一维(复活是回主人身边,所以这里就是主人那一维)
+     */
+    static String relicNote(ResourceKey<Level> deathDim, BlockPos deathPos,
+                            ResourceKey<Level> nowDim) {
+        if (deathDim == null || deathPos == null) {
+            return null;
+        }
+        String where = deathPos.getX() + ", " + deathPos.getY() + ", " + deathPos.getZ();
+        if (deathDim.equals(nowDim)) {
+            return "you died at " + where + " and whatever you dropped is still lying there. "
+                    + "Remember the spot and go back for it when you can — if you can't reach it, "
+                    + "give up and say so honestly.";
+        }
+        return "you died in " + deathDim.location() + " at " + where
+                + " — you respawned at your owner's side and did not go back, so your dropped "
+                + "items are still there. Nothing was retrieved.";
     }
 
     /**

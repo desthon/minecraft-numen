@@ -78,4 +78,45 @@ public final class SurvivalDecisions {
     public static boolean breathTriggered(boolean headUnderWater, int airSupply) {
         return headUnderWater && airSupply <= LOW_AIR_TICKS;
     }
+
+    // ---- hunger thresholds (vanilla: below 6 you can't sprint; below 18 regen stops) ----
+    /**
+     * <b>开饭线</b>:饿到这个程度就该自己找东西吃了。比原版"跑不动"的 6 高——等到 6
+     * 才动手,她已经饿到快掉血,而找吃的、嚼完还要时间(一口三十二刻)。
+     */
+    public static final int HUNGRY_LEVEL = 10;
+
+    /**
+     * <b>收手线</b>:一顿吃到这个程度才算完。与开饭线拉开一条迟滞带——两条线重合的话,
+     * 她会在阈值上吃一口停一口(吃到 11、掉回 10、再吃一口),看着像个卡住的机器。
+     */
+    public static final int FED_LEVEL = 16;
+
+    /**
+     * 饿了,该不该自己吃。<b>这四个条件一个都不能少</b>:
+     *
+     * <ul>
+     *   <li>{@code alive} —— 死人不吃饭;</li>
+     *   <li>{@code hasFood} —— 背包里没有能吃的,抢了身体也只是站着(找吃的是一次
+     *       有目标的活,不是本能:本能只做"手边有料"的那部分);</li>
+     *   <li>{@code threatened} —— 身边有正在追她的东西时不吃:一边挨打一边坐下啃,
+     *       两件事都做不成。自卫那条(注册号 30)在她面前,这里只是不添乱;</li>
+     *   <li>{@code food <= }{@link #HUNGRY_LEVEL} —— 不饿就不抢身体。</li>
+     * </ul>
+     *
+     * <p>只回答"现在开不开饭";开吃之后靠 {@link #fedEnough} 决定什么时候收手,
+     * 迟滞的那一位状态跟着身体走,不在这个纯函数里。
+     */
+    public static boolean hungryTriggered(int food, boolean hasFood, boolean threatened, boolean alive) {
+        if (!alive || !hasFood || threatened) return false;
+        return food <= HUNGRY_LEVEL;
+    }
+
+    /**
+     * 吃饱到可以收手了。已经在吃的那一顿(走在开饭线与收手线之间)靠它收尾 ——
+     * 只判"到没到线",不看别的:走到这一步时"活着/有料/没威胁"都已经在链上过了。
+     */
+    public static boolean fedEnough(int food) {
+        return food >= FED_LEVEL;
+    }
 }

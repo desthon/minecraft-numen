@@ -53,7 +53,7 @@ public final class NumenEvents {
         TIMER("timer"),
         /** 她从床上醒了。{@code sleep} 到躺下就返回,醒来这一刻只有这条事件说得出。 */
         WOKE("woke"),
-        /** 饿了 —— 她不会自己吃,得主人给或者叫她去弄。 */
+        /** 饿了 —— 她会自己吃(core 的进食链),这条只是告诉主人一声。 */
         HUNGRY("hungry"),
         /** 主人挨打了(只报实体攻击)。急不急按主人血线分档,见 {@code ownerHurt}。 */
         OWNER_HURT("owner_hurt");
@@ -72,13 +72,15 @@ public final class NumenEvents {
     private NumenEvents() {}
 
     /**
-     * 她饿了。<b>急</b> —— 她不会自己吃,主人不知道就没人管,饱食归零会开始掉血。
+     * 她饿了。<b>急</b> —— 她自己会吃(core 的进食链在帮她张罗),但主人该知道他快断粮了:
+     * 背包里没有食物、或者她正被别的事绊住时,饱食归零会开始掉血,那是要人管的。
      * 去抖在 {@code NumenPlayer.pollGotHungry}:一轮饥饿只发一条。
      */
     public static void gotHungry(NumenPlayer companion, int foodLevel) {
         emit(companion, Kind.HUNGRY, null,
-                "you are hungry (" + foodLevel + "/20) and you do not eat on your own — "
-                        + "call eat with something from your inventory, or go get food",
+                "you are hungry (" + foodLevel + "/20); your own eating reflex is already on it, but if "
+                        + "the ready food is gone or you are busy, eat something from your inventory or go "
+                        + "get food",
                 true);
     }
 

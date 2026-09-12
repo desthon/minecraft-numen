@@ -88,10 +88,19 @@ public final class EntityAgentLoop {
      */
     private static final int AUTO_COMPACT_BUFFER_TOKENS = 13_000;
     /**
-     * 压缩时原文保留的近段预算(tokens,估算口径见 {@link CompactSplit})。参考 pi 的
+     * 压缩时原文保留的近段预算<b>上限</b>(tokens,估算口径见 {@link CompactSplit})。参考 pi 的
      * keepRecentTokens:摘要只替换更早的部分,主人刚说的话逐字跨过压缩边界。
+     *
+     * <p>它只是上限:这一轮真留多少由 {@link CompactSplit#keepBudget} 按窗口算出来。保留量与
+     * 闸门必须是同一个相对量,否则小窗口上"压完还热"——这也是每轮重压的根子。
      */
     private static final int KEEP_RECENT_TOKENS = 20_000;
+    /**
+     * 摘要自身占的位置:压缩后的历史 = 摘要 + 原文保留的近段,而闸门要判定的正是
+     * "保留近段 + 摘要 + 固定开销"这个地板放不放得下。摘要多大事前不知道,留个经验值;
+     * 真超了由 {@link #finishCompaction} 的复核发现(见那里的"没腾出空间"分支)。
+     */
+    private static final int COMPACT_SUMMARY_RESERVE_TOKENS = 4_000;
     /** 自动整理的下限:短于这个数不值得自己动手。手动 {@code /compact} 不看它。 */
     private static final int MIN_COMPACT_MESSAGES = 8;
     /** 给目标评估器看的对话上限。够装下整个目标期间,又不至于把整段会话都发一遍。 */
@@ -218,6 +227,24 @@ public final class EntityAgentLoop {
     private long lastPromptTokens = 0;
     /** Consecutive compaction failures — circuit breaker for the auto path. */
     private int compactFailures = 0;
+    /**
+     * 上一轮请求的<b>本地原始估算</b>(同一份请求、同一把尺,未乘 {@link #tokenRulerScale})。
+     * 后端报了 usage 就拿它做分母,量出这把尺偏了多少。
+     */
+    private int lastRequestRawEstimate = 0;
+    /**
+     * 实测/估算之比,尺子的校正系数。{@link CompactSplit} 的尺是数字符推的,工具结果那种高
+     * 符号密度的 JSON 天然被低估(见那里的类注释);这里用后端真报的数把它拉回来。起始 1.0
+     * = 不校正,拿到 usage 之前按原始尺子走。
+     */
+    private double tokenRulerScale = 1.0;
+    /**
+     * 保留近段的自适应收缩系数:上一次压完没腾出空间(摘要比预留的大)就减半,下一次压得更狠,
+     * 而不是原样再压一遍。腾出空间即复位。
+     */
+    private double keepShrinkFactor = 1.0;
+    /** "压了也放不下"这条日志只说一次,别把每一轮都刷满。 */
+    private boolean compactNoFitLogged = false;
 
     /**
      * Set while the body is DEAD and awaiting its timed respawn (see {@link #onEntityDied} /
@@ -809,6 +836,9 @@ public final class EntityAgentLoop {
         lastPromptTokens = 0;
         tokens.waste().reset();   // 同压缩:历史剪断之后上一轮不再可比
         compactFailures = 0;
+        // 保留近段的收缩是"上次没压出空间"的记性;历史都清空了,这条记性没有意义。
+        // (尺子的校正系数不动:它是模型/tokenizer 的属性,与这段对话无关。)
+        keepShrinkFactor = 1.0;
         Constants.LOG.info("[numen-entity#{}] 上下文清空(记录留档)", entityUuid);
     }
 
@@ -1221,7 +1251,9 @@ public final class EntityAgentLoop {
                 return true;
             }
             Constants.LOG.info("[numen-entity#{}] 整理记忆:排到了,开始", entityUuid);
-            startCompaction(false);
+            // 手动整理不看闸门(主人明确要求了),但保留近段仍按窗口算:小窗口上留 20k 原文,
+            // 压完还是热的,那才叫白按一次。
+            startCompaction(false, CompactSplit.keepBudget(modelWindow(), KEEP_RECENT_TOKENS));
             return true;
         }
         ownerSpokeThisTurn = text.stream().anyMatch(e -> EventTypes.QUERY.equals(e.type()));
@@ -1316,13 +1348,33 @@ public final class EntityAgentLoop {
         long contextTokens = lastPromptTokens > 0
                 ? lastPromptTokens
                 : estimateContextTokens(convo.snapshot());
-        if (contextTokens >= window - AUTO_COMPACT_BUFFER_TOKENS
+        // 闸门判据是纯逻辑(CompactSplit.judge):过了线<b>还得压得动</b>——压缩后的地板
+        // (保留近段 + 摘要 + 固定开销)必须落在阈值之下,放不下就先缩保留近段,缩到底还
+        // 放不下就明确不压。原来只判"过没过线",压完仍旧过线,于是每一轮开轮前都压一次,
+        // 一个动作烧一次摘要调用——运行久了"每个动作都很慢"就是这么来的。
+        int keepCap = (int) (KEEP_RECENT_TOKENS * keepShrinkFactor);
+        CompactSplit.Gate gate = CompactSplit.judge(
+                (int) Math.min(Integer.MAX_VALUE, contextTokens), window, AUTO_COMPACT_BUFFER_TOKENS,
+                CompactSplit.keepBudget(window, keepCap),
+                COMPACT_SUMMARY_RESERVE_TOKENS, ESTIMATED_FIXED_OVERHEAD_TOKENS);
+        if (gate.compact()) {
+            compactNoFitLogged = false;   // 又能压了,之前那条拒绝日志不再代表现状
+        } else if (contextTokens >= window - AUTO_COMPACT_BUFFER_TOKENS && !compactNoFitLogged) {
+            // 过了线却压不动:压缩后的地板本身就压在阈值上,压了下一轮还是要压,白烧一次摘要。
+            // 只说一次——每轮刷一遍只会把日志刷花。
+            compactNoFitLogged = true;
+            Constants.LOG.warn("[numen-entity#{}] 上下文 {} 已过压缩线(窗口 {} - {}),但这个窗口装不下压缩后的地板"
+                            + "(保留近段 {} + 摘要 {} + 固定开销 {}):不压,免得每轮重压一次",
+                    entityUuid, contextTokens, window, AUTO_COMPACT_BUFFER_TOKENS,
+                    gate.keepRecentTokens(), COMPACT_SUMMARY_RESERVE_TOKENS, ESTIMATED_FIXED_OVERHEAD_TOKENS);
+        }
+        if (gate.compact()
                 && convo.snapshot().size() >= MIN_COMPACT_MESSAGES
                 && compactFailures < MAX_COMPACT_FAILURES) {
-            Constants.LOG.info("[numen-entity#{}] auto-compacting: {} context {} tokens >= {} - {}",
+            Constants.LOG.info("[numen-entity#{}] auto-compacting: {} context {} tokens >= {} - {}, keeping {}",
                     entityUuid, lastPromptTokens > 0 ? "measured" : "estimated",
-                    contextTokens, window, AUTO_COMPACT_BUFFER_TOKENS);
-            startCompaction(true);
+                    contextTokens, window, AUTO_COMPACT_BUFFER_TOKENS, gate.keepRecentTokens());
+            startCompaction(true, gate.keepRecentTokens());
             return;
         }
 
@@ -1334,6 +1386,8 @@ public final class EntityAgentLoop {
         var tools = ToolRegistry.resident();
         var snapshot = modelContextSnapshot();
         String systemPrompt = composeSystemPrompt();
+        // 尺子校正的比价基准:这一份就是马上要发出去的请求,后端回来的 prompt_tokens 与它可比。
+        lastRequestRawEstimate = rawEstimateContextTokens(snapshot);
 
         Constants.LOG.info("[numen-entity#{}] turn {}: convo={} msgs, tools={}",
                 entityUuid, convo.turnCount(), snapshot.size(), tools.size());
@@ -1380,14 +1434,15 @@ public final class EntityAgentLoop {
      * Fire the summarization call: the OLDER span of the history + the compact
      * prompt as the final user message, NO tools, a minimal system prompt (skills
      * XML and the persona would only waste the very tokens we're trying to
-     * reclaim). 最近约 {@link #KEEP_RECENT_TOKENS} 的消息不进请求也不被替换——
-     * 它们原文跟在摘要之后(切分规则见 {@link CompactSplit})。整段都在近段预算内
-     * 时(基本只有手动 /compact 会遇到)退化为全量总结,只逐字保留末尾那句回答。
+     * reclaim). 最近约 {@code keepRecentTokens} token 的历史不进请求也不被替换——
+     * 它们原文跟在摘要之后(切分规则见 {@link CompactSplit},预算由闸门按窗口算出,
+     * 上限 {@link #KEEP_RECENT_TOKENS})。整段都在近段预算内时(基本只有手动 /compact
+     * 会遇到)退化为全量总结,只逐字保留末尾那句回答。
      */
-    private void startCompaction(boolean auto) {
+    private void startCompaction(boolean auto, int keepRecentTokens) {
         compacting = true;
         compactChars.set(0);
-        CompactSplit.Split split = CompactSplit.byRecentBudget(convo.snapshot(), KEEP_RECENT_TOKENS);
+        CompactSplit.Split split = CompactSplit.byRecentBudget(convo.snapshot(), keepRecentTokens);
         final List<ConvoState.Msg> toSummarize;
         final List<ConvoState.Msg> kept;
         if (split.toSummarize().isEmpty()) {
@@ -1462,12 +1517,28 @@ public final class EntityAgentLoop {
         display.add(new ConvoState.Msg.User(ConvoLog.COMPACT_DIVIDER));
         lastPromptTokens = 0;   // unknown until the next request reports usage
         tokens.waste().reset();   // 前缀本来就换了,下一轮的未命中不算"白付"
-        compactFailures = 0;
+        // 复核:摘要成了不等于腾出了空间。用校正过的尺量一遍压缩后的历史,量出来还在阈值之上,
+        // 就说明这个窗口装不下压缩后的地板——计入断路器并收缩保留近段,免得下一轮开轮又原样
+        // 压一次(每轮重压正是"运行久了每个动作都要压缩一次"的来源)。
+        int window = modelWindow();
+        int postTokens = estimateContextTokens(next);
+        boolean freed = postTokens < window - AUTO_COMPACT_BUFFER_TOKENS;
+        if (freed) {
+            compactFailures = 0;
+            keepShrinkFactor = 1.0;
+        } else {
+            compactFailures++;
+            keepShrinkFactor = Math.max(0.25, keepShrinkFactor / 2);
+            Constants.LOG.warn("[numen-entity#{}] 压完仍有约 {} tokens(阈值 {}):没腾出空间,"
+                            + "保留近段收缩到 {}x,并计入断路器({}/{})",
+                    entityUuid, postTokens, window - AUTO_COMPACT_BUFFER_TOKENS,
+                    keepShrinkFactor, compactFailures, MAX_COMPACT_FAILURES);
+        }
         Constants.LOG.info(
-                "[numen-entity#{}] compaction done ({}): {} tokens → summary ({} chars) + {} preserved msg(s) in {} ms",
+                "[numen-entity#{}] compaction done ({}): {} tokens → summary ({} chars) + {} preserved msg(s) = ~{} tokens in {} ms",
                 entityUuid, auto ? "auto" : "manual",
                 res.promptTokens() > 0 ? String.valueOf(res.promptTokens()) : "?",
-                wrapped.length(), preserved.size(), System.currentTimeMillis() - startMs);
+                wrapped.length(), preserved.size(), postTokens, System.currentTimeMillis() - startMs);
 
         // Auto-compaction interrupted a turn that was about to dispatch —
         // resume it so the task chain continues on the compacted history. After
@@ -1500,16 +1571,39 @@ public final class EntityAgentLoop {
     private static final int ESTIMATED_FIXED_OVERHEAD_TOKENS = 8_000;
 
     /**
-     * Rough token count of the history for backends that report no usage.
-     * CJK sits near 1 token/char on modern tokenizers; ASCII (tool-result
-     * JSON, coordinates) near 3.5–4 chars/token. Precision is not the goal —
-     * the 13k {@link #AUTO_COMPACT_BUFFER_TOKENS} absorbs the error; what
-     * matters is that the auto gate fires AT ALL without a usage frame.
+     * Rough token count of the history for backends that report no usage, in the
+     * same unit as the measured value so the gate's two inputs stay comparable:
+     * the {@link CompactSplit} character ruler (CJK ~1 token/char, ASCII ~2.5
+     * chars/token, 8 tokens of structure per message) plus the fixed overhead,
+     * then scaled by the measured/estimated ratio learned from real usage frames.
      */
-    private static int estimateContextTokens(List<ConvoState.Msg> history) {
-        // 字尺只有一把:与压缩切分共用 CompactSplit 的估算(CJK ~1 token/字、ASCII ~4 字符/token、
-        // 每条 8 token 结构开销),这里只加系统提示/工具表的固定开销。
+    private int estimateContextTokens(List<ConvoState.Msg> history) {
+        return (int) Math.round(rawEstimateContextTokens(history) * tokenRulerScale);
+    }
+
+    /**
+     * 未校正的原始估算。量"这把尺偏了多少"必须拿它当分母,拿校正过的去比就成了自己喂自己。
+     */
+    private static int rawEstimateContextTokens(List<ConvoState.Msg> history) {
         return CompactSplit.estimateTokens(history) + ESTIMATED_FIXED_OVERHEAD_TOKENS;
+    }
+
+    /**
+     * 用实测结果校正尺子:同一份请求,后端数出来的 prompt_tokens 除以本地原始估算,就是这把
+     * 字符尺的系统性偏差(工具结果那种高符号密度 JSON 天然被低估)。
+     *
+     * <p>指数平滑而不是直接赋值:一个异常 usage 帧不该把闸门带着抖。比值离谱到不像同一份
+     * 请求(缓存口径不同、后端只报输出)就直接不学——学了反而更糟。
+     */
+    private void calibrateRuler(long measuredTokens) {
+        if (lastRequestRawEstimate <= 0 || measuredTokens <= 0) {
+            return;
+        }
+        double observed = (double) measuredTokens / lastRequestRawEstimate;
+        if (observed < 0.25 || observed > 8.0) {
+            return;
+        }
+        tokenRulerScale = Math.min(4.0, Math.max(0.5, tokenRulerScale * 0.5 + observed * 0.5));
     }
 
     /**
@@ -1601,7 +1695,8 @@ public final class EntityAgentLoop {
      * 这里只负责渲染——所以"换没换"只有一个信号:快照的时间戳。
      *
      * <p>放进请求而不是让她调 {@code get_self_status},省的是<b>一整轮</b>(请求 + 工具结果 +
-     * 再请求)。合并同类计数,不报耐久附魔:要精确到槽位时她该调 {@code inspect_gui}。
+     * 再请求)。合并同类计数,内容(药水)与附魔都印成短标签,耐久不印:要精确到槽位、
+     * 要看耐久时她该调 {@code inspect_gui}。
      */
     private String inventoryXml() {
         var snapshot = ClientNumenState.get(entityUuid).orElse(null);
@@ -1708,11 +1803,51 @@ public final class EntityAgentLoop {
         return stack.isEmpty() ? "(empty)" : xml(itemId(stack));
     }
 
+    /**
+     * 一件东西在背包块里长什么样:注册名(+ 内容短标签)。
+     *
+     * <p>短标签此前只有药水({@link #brewLabel}),附魔一律看不见——"锋利五的剑"与白板剑
+     * 在每一轮请求里长得一模一样,她会拿着附魔装备当白板去估战力(玩家报的 bug:看不见
+     * 装备的附魔)。附魔印注册名 + 等级就够她判断,又不到一整段 tooltip 的长度。
+     *
+     * <p>同一套规则在 numen-core 的 {@code ItemDescribe} 里也有一份:api 是引擎、core 建在
+     * 它上面,api 反向 import core 会成环(见 core/common 的 build.gradle)。改这里的口径
+     * 时那边要一起改。
+     */
     private static String itemId(net.minecraft.world.item.ItemStack stack) {
         String id = net.minecraft.core.registries.BuiltInRegistries.ITEM
                 .getKey(stack.getItem()).toString();
-        String brew = brewLabel(stack);
-        return brew.isEmpty() ? id : id + "[" + brew + "]";
+        StringBuilder label = new StringBuilder(brewLabel(stack));
+        String enchants = enchantLabel(stack);
+        if (!enchants.isEmpty()) {
+            if (label.length() > 0) label.append('+');
+            label.append(enchants);
+        }
+        return label.length() == 0 ? id : id + "[" + label + "]";
+    }
+
+    /**
+     * 附魔短标签:注册名 + 等级,多个之间用逗号。按注册名排序——附魔是个 map,不排序的话
+     * 同一把剑每一轮印出来的顺序都可能不同,而背包块就挂在请求里,顺序一抖 prompt cache
+     * 跟着一起碎。
+     */
+    private static String enchantLabel(net.minecraft.world.item.ItemStack stack) {
+        // 1.20.1:附魔写在 NBT 里,EnchantmentHelper.getEnchantments 读的就是它(组件系统是 1.20.5+)。
+        var enchantments = net.minecraft.world.item.enchantment.EnchantmentHelper.getEnchantments(stack);
+        if (enchantments.isEmpty()) {
+            return "";
+        }
+        java.util.TreeMap<String, Integer> sorted = new java.util.TreeMap<>();
+        for (var entry : enchantments.entrySet()) {
+            var key = net.minecraft.core.registries.BuiltInRegistries.ENCHANTMENT.getKey(entry.getKey());
+            sorted.put(key == null ? "unknown" : key.getPath(), entry.getValue());
+        }
+        StringBuilder out = new StringBuilder();
+        sorted.forEach((name, level) -> {
+            if (out.length() > 0) out.append(", ");
+            out.append(name).append(' ').append(level);
+        });
+        return out.toString();
     }
 
     /**
@@ -1903,6 +2038,7 @@ public final class EntityAgentLoop {
         // signal. 0 when the backend sent no usage frame (then auto never fires).
         if (res.promptTokens() > 0) {
             lastPromptTokens = res.promptTokens();
+            calibrateRuler(res.promptTokens());
         }
         tokens.add(res.usage());
         // 目标的账单:主人得看得见这个目标到现在烧了多少。

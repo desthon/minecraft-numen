@@ -67,11 +67,18 @@ public final class NumenPlayer extends ServerPlayer {
      */
     private boolean hungerReported;
 
-    /** 饿到这个程度就说一声。原版低于 6 跑不动,低于 18 自然回血停。 */
-    private static final int HUNGRY_LEVEL = 6;
+    /**
+     * 饿到这个程度就说一声。比原版"跑不动"的 6 高:她自己会动手吃(见 core 的
+     * {@code EatChain},注册号 40),但等到 6 才开始找吃的已经太迟。
+     *
+     * <p><b>与 core 的 {@code SurvivalDecisions.HUNGRY_LEVEL/FED_LEVEL} 是同一对数</b>
+     * ——那边定"什么时候自己吃",这边定"什么时候告诉主人"。api 不能依赖 core,
+     * 所以这两个数在这里写了第二遍:改一处必须改两处。
+     */
+    private static final int HUNGRY_LEVEL = 10;
 
-    /** 回到这个程度才重新武装 —— 留一大段迟滞,免得在阈值上一条接一条。 */
-    private static final int FED_LEVEL = 14;
+    /** 回到这个程度才重新武装 —— 留一大段迟滞,免得在阈值上一条接一条。同样与 core 的 FED_LEVEL 对齐。 */
+    private static final int FED_LEVEL = 16;
 
     /**
      * 她这一刻<b>主动按住</b>的本能(按 {@code Reflex.id()})。
@@ -115,8 +122,10 @@ public final class NumenPlayer extends ServerPlayer {
      * 这一刻该不该跟主人说"我饿了"。<b>一轮饥饿只说一次</b>:说过就闭嘴,吃回
      * {@link #FED_LEVEL} 以上才重新武装。
      *
-     * <p>她<b>不会自己吃</b> —— 那条常驻链删了。饿了是主人该知道的事,交互本身就是目的;
-     * 而"我解决不了"才值得打断他,这跟逃跑那条一个道理:打赢了不吵他。
+     * <p>她<b>会自己吃</b>(core 的 {@code EatChain}:翻背包、嚼完、饱食度回来)。所以这条
+     * 不是求救,是<b>告诉她一声</b>:饿了自己动手这件事她做得,主人却有权知道她在挨饿、
+     * 以及为什么她突然停下来啃东西。仍然发 urgent 一条,但一轮饥饿只有这一条 ——
+     * 说出口就开一轮,不会吵他第二次。
      */
     public boolean pollGotHungry() {
         int food = getFoodData().getFoodLevel();

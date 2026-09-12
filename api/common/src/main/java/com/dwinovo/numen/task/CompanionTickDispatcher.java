@@ -105,7 +105,7 @@ public final class CompanionTickDispatcher {
                 if (ap.pollWokeUp()) {
                     Companions.onWoke(ap);
                 }
-                // 饿了说一声。她不会自己吃 —— 那条常驻链删了,交互本身就是目的。
+                // 饿了说一声。她自己会吃(core 的进食链),这条是让主人知道快断粮了。
                 if (ap.pollGotHungry()) {
                     com.dwinovo.numen.event.NumenEvents.gotHungry(
                             ap, ap.getFoodData().getFoodLevel());

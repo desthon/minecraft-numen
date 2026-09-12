@@ -69,18 +69,24 @@ public final class NumenCore {
      */
     private static void registerReflexes() {
         // 注册号小的先问 —— 与原版 addGoal(int priority, goal) 同一惯例。
-        // 顺序<b>照搬旧的浮点优先级</b>(MLG 10 > 换气 6 > 自卫 5 > 进食 4/3 > 脱困 2),
+        // 顺序<b>照搬旧的浮点优先级</b>(MLG 10 > 换气 6 > 自卫 5 > 进食 4 > 脱困 2),
         // 那些数值本身已经退役:反射之间的先后是固定的,不随世界状态变,用连续量
         // 表达一个固定序,数值就成了必须维护却没人看得懂的魔法数。
         //
         // 正在坠落是最迫近的死法,所以摔落缓冲压过一切;卡住只是烦人,绝不该压过
         // 打架或吃饭 —— 这条排序是有单测守着的(ReflexOrderTest)。
+        //
+        // 进食(40)在自卫之后、脱困之前:一边挨打一边坐下啃,两件事都做不成;
+        // 而卡住只是烦人,饿久了要掉血。它曾经整条被删过(饿了只发事件让主人管),
+        // 玩家报告"饿了不会自己吃东西"是 bug,所以恢复。
         com.dwinovo.numen.task.BrainChains.register(10,
                 com.dwinovo.numen.core.task.chain.MLGChain::new);
         com.dwinovo.numen.task.BrainChains.register(20,
                 com.dwinovo.numen.core.task.chain.BreathChain::new);
         com.dwinovo.numen.task.BrainChains.register(30,
                 com.dwinovo.numen.core.task.chain.MobDefenseChain::new);
+        com.dwinovo.numen.task.BrainChains.register(40,
+                com.dwinovo.numen.core.task.chain.EatChain::new);
         com.dwinovo.numen.task.BrainChains.register(50,
                 com.dwinovo.numen.core.task.chain.UnstuckChain::new);
     }
