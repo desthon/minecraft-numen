@@ -1,10 +1,12 @@
 package com.dwinovo.numen.client.agent;
 
+import com.dwinovo.numen.agent.llm.ProviderMarkup;
 import com.dwinovo.numen.client.chat.ChatDisplayModes;
 import com.dwinovo.numen.client.chat.ChatLines;
 import com.dwinovo.numen.client.voice.VoiceLibrary;
 import com.dwinovo.numen.client.voice.VoicePipeline;
 import com.dwinovo.numen.platform.Services;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
 
@@ -92,7 +94,7 @@ final class TurnPresenter {
         streamToChat();
     }
 
-    /** onChunk 接线:content delta 直通 UI 的 live-partial,原始 chunk 原样继续喂语音。 */
+    /** onChunk 接线:content delta 直通 UI 的 live-partial,净化后的增量继续喂语音。 */
     Consumer<JsonObject> tapForUi(int gen, Consumer<JsonObject> voiceSink) {
         return tapForUi(gen, voiceSink, null);
     }
@@ -100,9 +102,20 @@ final class TurnPresenter {
     /**
      * 带思考流分接头的版本:reasoningDelta(provider 的方言解码)抽出的思考
      * 增量喂头顶思考泡的本地流——主人能看见她在想什么,不只是省略号。
+     *
+     * <p><b>语音那一份在这里先净化。</b>聊天框的两处(流式行、面板打字机)看的是整段
+     * 缓冲,每 tick 重算一遍,尾部残片天然不会先露头;语音不行——它是增量喂的
+     * (SentenceDivider 逐块分句),记号被切在两个 chunk 之间时("&lt;|DSM" + "L| tool_calls&gt;"),
+     * 前半截当场成句就被念出去了。所以这里挂一条"粘性"净化线:疑似记号开头的尾巴扣住,
+     * 只吐确定干净的前缀,补全后整枚丢掉。
+     *
+     * <p>流末仍扣着的那点尾巴不再吐:它就是残片,宁可漏念一个孤零零的 "&lt;"。
      */
     Consumer<JsonObject> tapForUi(int gen, Consumer<JsonObject> voiceSink,
                                   java.util.function.Function<JsonObject, String> reasoningDelta) {
+        // 每次分发一条独立的净化线(与下面那条语音管线同一代际);单条 SSE 回调按序打在一个线程上,
+        // 所以这里不需要同步。
+        final ProviderMarkup.StreamCleaner spoken = new ProviderMarkup.StreamCleaner();
         return chunk -> {
             String delta = VoicePipeline.extractContentDelta(chunk);
             if (delta != null && !delta.isEmpty()) {
@@ -118,8 +131,28 @@ final class TurnPresenter {
                     });
                 }
             }
-            if (voiceSink != null) voiceSink.accept(chunk);
+            if (voiceSink != null && delta != null) {
+                String text = spoken.feed(delta);
+                if (!text.isEmpty()) voiceSink.accept(contentChunk(text));
+            }
         };
+    }
+
+    /**
+     * 把净化后的文本包成语音管线认得的最小 chunk——{@link VoicePipeline#extractContentDelta}
+     * 只读 {@code choices[0].delta.content},所以这里就照那个形状包一份,不动语音侧的
+     * 分句/合成,也不碰中间件那份原始 chunk(它已经进了累加器,改它会坏解析)。
+     */
+    private static JsonObject contentChunk(String text) {
+        JsonObject delta = new JsonObject();
+        delta.addProperty("content", text);
+        JsonObject choice = new JsonObject();
+        choice.add("delta", delta);
+        JsonArray choices = new JsonArray();
+        choices.add(choice);
+        JsonObject chunk = new JsonObject();
+        chunk.add("choices", choices);
+        return chunk;
     }
 
     /**
@@ -155,7 +188,9 @@ final class TurnPresenter {
         VoiceLibrary.Entry cfg = VoiceLibrary.instance().resolve(entityUuid);
         if (cfg == null) return;
         if (voice == null) voice = new VoicePipeline(entityUuid);
-        voice.sayAppend(cfg, text);
+        // 整段开说没有"半截记号"的问题(文本已经收完了),整段剥即可;
+        // 聊天行与气泡那一份由 EntityAgentLoop.externalSay 走呈现口剥离。
+        voice.sayAppend(cfg, ProviderMarkup.clean(text));
     }
 
     /** 聊天框的打字机:在飞回复逐 tick 长出来——不开面板也能实时看她说话。 */

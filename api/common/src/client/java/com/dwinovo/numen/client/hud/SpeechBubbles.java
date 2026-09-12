@@ -1,5 +1,6 @@
 package com.dwinovo.numen.client.hud;
 
+import com.dwinovo.numen.agent.llm.ProviderMarkup;
 import com.dwinovo.numen.client.agent.AgentLoopRegistry;
 
 import java.util.HashMap;
@@ -69,7 +70,9 @@ public final class SpeechBubbles {
     /** 她说了一句话:顶掉上一句,按字数给寿命。空串 = 没话说,清掉当前正文。 */
     public static void say(UUID entityUuid, String text) {
         if (entityUuid == null) return;
-        String shown = text == null ? "" : text.trim();
+        // 气泡是主人一眼就看见的那一处,记号在这儿最扎眼:落账前再剥一道
+        // (调用方多半已经从呈现口剥过,剥两次是幂等的——净化器是纯函数)。
+        String shown = text == null ? "" : ProviderMarkup.clean(text).trim();
         if (shown.isEmpty()) {
             SAID.remove(entityUuid);
             return;

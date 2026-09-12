@@ -1,5 +1,7 @@
 package com.dwinovo.numen.client.chat;
 
+import com.dwinovo.numen.agent.llm.ProviderMarkup;
+
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -35,8 +37,10 @@ public final class OwnerWordsMode implements ChatDisplayMode {
     @Override
     public String assistantText(String raw) {
         if (raw == null) return "";
+        // 正文里夹带的模型特殊记号(<|DSML| tool_calls> 那类)是导线上的东西,不是她说的话:
+        // 聊天行、头顶气泡、面板回显全从这一道过,先剥干净再排版。
         // 段落间的空行折叠成单换行——聊天面板寸土寸金,空行只是模型的排版习惯。
-        return raw.replaceAll("\\n\\s*\\n+", "\n").strip();
+        return ProviderMarkup.clean(raw).replaceAll("\\n\\s*\\n+", "\n").strip();
     }
 
     /**

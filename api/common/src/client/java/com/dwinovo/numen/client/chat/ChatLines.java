@@ -1,5 +1,6 @@
 package com.dwinovo.numen.client.chat;
 
+import com.dwinovo.numen.agent.llm.ProviderMarkup;
 import com.dwinovo.numen.client.screen.UiTheme;
 import com.dwinovo.numen.mixin.ChatComponentAccessor;
 
@@ -57,7 +58,9 @@ public final class ChatLines {
 
     /** 同伴的回复定格行:加粗着色名字 + 近白正文,全文显示不折叠。 */
     public static void companion(String companionName, String text) {
-        String flat = text.replaceAll("\\s+", " ").trim();
+        // 最后落笔的地方再兜一道:调用方大多已经从呈现口剥过记号,但
+        // externalSay 那条"剥完是空就原样示人"的兜底会把原文递进来——聊天栏不该指望上游。
+        String flat = ProviderMarkup.clean(text).replaceAll("\\s+", " ").trim();
         if (flat.isEmpty()) {
             return;
         }
@@ -81,8 +84,10 @@ public final class ChatLines {
             ChatComponent chat = Minecraft.getInstance().gui.getChat();
             ChatComponentAccessor acc = (ChatComponentAccessor) chat;
             removeLive(acc, companion);
+            // 在飞正文与定格行走同一道净化:半截记号不在这里长出来——流式行看到的是
+            // 整段缓冲,尾部的残片由净化器按残片丢掉,补全后按记号丢掉
             MutableComponent line = name(companionName)
-                    .append(Component.literal(partial).withStyle(s -> s.withColor(TEXT)))
+                    .append(Component.literal(ProviderMarkup.clean(partial)).withStyle(s -> s.withColor(TEXT)))
                     .append(Component.literal("▌").withStyle(s -> s.withColor(OWN)));
             chat.addMessage(line);
             List<GuiMessage> all = acc.numen$allMessages();
