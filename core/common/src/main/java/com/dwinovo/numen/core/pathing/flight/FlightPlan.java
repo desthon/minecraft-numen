@@ -108,14 +108,34 @@ public final class FlightPlan {
     }
 
     /**
-     * 这一刻该不该飞。
+     * 这一刻该不该飞 —— <b>两把锁都要开,外加身上没挂载具</b>。
      *
-     * <p>两个入参都是<b>能力事实</b>,不是意图:她到底被允许飞吗(mayfly),身上挂着
-     * 载具吗。坐在船上/马上"飞"没有意义——载具的物理在她身下,推她自己的输入只会
-     * 把船拖歪(步行导航也是先下座驾,见 {@code PlayerNav.tick})。
+     * <h2>为什么是两把锁,而不是只看 {@code mayfly}</h2>
+     * 这是实机 bug「生存档仍然调用飞行代码」的根子:这条判据早先只看能力位
+     * ({@code mayfly})。而 {@code mayfly} 是<b>从 .dat 里读回来的上一次的事实</b>
+     * ({@code Player.addAdditionalSaveData} 会存它),它并不保证与此刻的档位一致 ——
+     * 于是"档位是生存、而能力位还留着 true"这种脏状态下,判据说"能飞",整条飞行路径
+     * 照跑不误。反过来也见过:{@code WorkProfile} 的画像按 {@code instabuild} 推,
+     * 于是"档位像创造、而 mayfly 是 false"时有人会去补能力位再飞。
+     *
+     * <p>所以判据要的是<b>两件互相独立的事实同时成立</b>:
+     * <ul>
+     *   <li>{@code modeGrantsFlight} —— <b>档位</b>本身给不给飞(创造/旁观);
+     *       {@code FlightPermit} 从游戏模式现读,不读能力位;</li>
+     *   <li>{@code mayFly} —— 能力位此刻的事实。</li>
+     * </ul>
+     * 任一为假就是不能飞,<b>脏状态一律往"不能飞"这一边倒</b>:宁可让主人在创造档下
+     * 看到一次"我飞不了"(她能自己修回来,见 {@code FlyToTask.onStart} 的补能力位),
+     * 也不要让一具生存档的身体在半空里挂起来。
+     *
+     * <p>第三个入参是载具:坐在船上/马上"飞"没有意义——载具的物理在她身下,推她自己的
+     * 输入只会把船拖歪(步行导航也是先下座驾,见 {@code PlayerNav.tick})。
+     *
+     * <p>纯函数(只吃三个布尔)是刻意的:这条闸门必须能被穷举单测,见
+     * {@code FlightPlanTest} 的 3×2×2 全矩阵。
      */
-    public static boolean canFly(boolean mayFly, boolean passenger) {
-        return mayFly && !passenger;
+    public static boolean canFly(boolean modeGrantsFlight, boolean mayFly, boolean passenger) {
+        return modeGrantsFlight && mayFly && !passenger;
     }
 
     /**
@@ -133,6 +153,39 @@ public final class FlightPlan {
             return -1;
         }
         return 0;
+    }
+
+    /**
+     * 落点容差(格)。四分之一格。
+     *
+     * <p>脚进到落脚点上方这一带里,离地面已经不是"飞行悬停"而是"最后一步踩下去":
+     * {@code FlightDrive} 到这儿就停飞,剩下的交给重力(<b>停飞之后 flying 必须是 false,
+     * 不留一个挂在半空的身体</b>)。
+     *
+     * <p>为什么不是半格:半格高已经能看出她"悬在地面上方"了,而那正是这条活最坏的
+     * 坏相。为什么不是 0:脚要像素级吻到那一格才算落地的话,任何一点残留速度都会让她
+     * 在落地前一刻永远差一点。
+     */
+    public static final double LANDING_TOLERANCE = 0.25;
+
+    /**
+     * 下落段该不该往下推。
+     *
+     * <p><b>这里故意不用 {@link #verticalThrust} 的死区</b>——那个死区是"巡航保持"的
+     * 判据(差得少就别推,免得在目标高度上下抖)。下落段照搬它,她就停在地面上方
+     * {@link #VERTICAL_DEADBAND} 以内不再往下推;而这具身体是<b>飞行</b>的:飞行分支
+     * 不施重力(见 {@code Player.travel}),原有那点下降速度按 0.6/刻衰减到零,于是她
+     * 就悬在离地几十厘米的地方,{@code onGround()} 永远不成立,卡住判定随后如实报成
+     * "我推了三十刻没动一格"——三段航线的第一段与第二段都好好的,坏的是这最后一段。
+     * 所以"落地"这条判据要的是<b>落到那一格</b>,不是"接近那一格"。
+     */
+    public static int descentThrust(double currentY, int landingY) {
+        return currentY > landingY + LANDING_TOLERANCE ? -1 : 0;
+    }
+
+    /** 落到落脚点了吗:脚已经进到落脚点上方 {@link #LANDING_TOLERANCE} 的带子里。 */
+    public static boolean reachedLandingHeight(double y, int landingY) {
+        return y <= landingY + LANDING_TOLERANCE;
     }
 
     /** 水平面上到目标点多远(格)。 */

@@ -105,6 +105,25 @@ public final class InputDriver {
     // ---- 飞行输入(创造/旁观这类"允许飞"的画像;见 core 的 FlightDrive) ----
 
     /**
+     * 这一刻到底能不能飞 —— <b>本类的防御性第二道闸</b>。
+     *
+     * <p>口径与 core 的 {@code FlightPermit.of} / 纯判据 {@code FlightPlan.canFly} 完全一致:
+     * <b>档位给许可(创造/旁观)+ {@code mayfly} + 没骑着东西</b>,三者缺一不可。
+     * 只看 {@code mayfly} 是不够的——它是从 .dat 读回来的上一次的事实,可能在生存档下
+     * 还留着 true(实机 bug「生存档仍然调用飞行代码」就是从这个脏状态漏进来的)。
+     *
+     * <p>为什么这里要再判一次(而不是信调用方):这个类是"写身体"的最后一站。
+     * 只要有一处调用点忘了判、或者许可在飞行中途被主人收回,这里的短路就是最后一道
+     * 防线——<b>不置 {@code flying}、不加飞行冲量</b>。
+     */
+    public static boolean flightPermitted(ServerPlayer p) {
+        if (p.isPassenger() || !p.getAbilities().mayfly) {
+            return false;
+        }
+        return p.isCreative() || p.isSpectator();
+    }
+
+    /**
      * 竖直推力的倍率。<b>抄的是原版客户端的那一行</b>
      * ({@code LocalPlayer.aiStep}:{@code i * abilities.getFlyingSpeed() * 3.0})——
      * 创造模式飞行的上升/下降本来只存在于客户端,服务端身体没有客户端替她按键,
@@ -126,12 +145,16 @@ public final class InputDriver {
      * 那次发送的接收端是一个空壳连接,所以它真正的价值在另一半:凡是后续会给她发
      * 能力包的路径(切模式、重生)拿到的都是同一份事实,而不是两个地方各记一半。
      */
-    public static void flightStart(ServerPlayer p) {
+    public static boolean flightStart(ServerPlayer p) {
+        if (!flightPermitted(p)) {
+            return false;   // 生存档 / 能力位不在 / 骑着东西:这一位绝不许被置真
+        }
         if (p.getAbilities().flying) {
-            return;   // 已经在飞:不重复发包
+            return true;   // 已经在飞:不重复发包
         }
         p.getAbilities().flying = true;
         p.onUpdateAbilities();
+        return true;
     }
 
     /**
@@ -140,6 +163,10 @@ public final class InputDriver {
      * <p><b>每一次飞行收场都必须走这里</b>(到点、被取消、被抢占、切回生存)。留着
      * {@code flying=true} 的身体不会自己落地——飞行分支不施重力,她只会一直飘着;
      * 而且这一位是<b>随 .dat 存档</b>的,休眠再回来还飘着。
+     *
+     * <p><b>这里故意不设闸</b>(与 {@link #flightStart} 不对称):许可被收回、档位切成
+     * 生存的那一刻,正是最需要把这一位清掉的时候。清一位永远不会让她飞起来,所以这条
+     * 路必须永远走得通。
      */
     public static void flightStop(ServerPlayer p) {
         if (!p.getAbilities().flying) {
@@ -176,13 +203,31 @@ public final class InputDriver {
     }
 
     /**
+     * 落点列里刹车:把水平惯性直接清零。
+     *
+     * <p>下落段她只推竖直方向({@link #flyVertical}),而飞行分支里横向速度是按 0.91/刻
+     * 衰减的:带着巡航速度(最高约半格/刻)进下落段,她会在刹住之前往目标列外<b>再飘三到
+     * 五格</b>。落点必须是那一列,所以进下落段就把水平速度归零。
+     *
+     * <p>这是本类第二处、也是最后一处直接写 {@code deltaMovement} 的地方(第一处是
+     * {@link #thrust} 那一记与客户端同源的竖直冲量)。它对应真玩家的一个动作:
+     * 松开前进键并把速度吃住——原版那点滑行在这里是"没到点"。
+     */
+    public static void killHorizontalDrift(ServerPlayer p) {
+        Vec3 v = p.getDeltaMovement();
+        if (v.x != 0.0 || v.z != 0.0) {
+            p.setDeltaMovement(0.0, v.y, 0.0);
+        }
+    }
+
+    /**
      * 竖直冲量。飞行分支把重力项丢掉、只把原有竖直速度乘 0.6 留下
      * (见 {@code Player.travel}),所以"升/降"在这里表现为每刻往速度上加一下——
      * 与原版按住空格/潜行键完全同一条路。
      */
     private static void thrust(ServerPlayer p, int dir) {
-        if (dir == 0) {
-            return;
+        if (dir == 0 || !flightPermitted(p)) {
+            return;   // 没有飞行许可就不许加冲量:这条只推进速度,不会自己消失
         }
         p.setDeltaMovement(p.getDeltaMovement().add(0.0,
                 dir * p.getAbilities().getFlyingSpeed() * FLIGHT_THRUST_SCALE, 0.0));

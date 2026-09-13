@@ -37,8 +37,8 @@ package com.dwinovo.numen.core.pathing.moves;
  *
  * <p><b>下落水柱(瀑布)</b>另有一档 {@link #fallingWaterCost}:推力竖直朝下,于是
  * "顺水柱往下"便宜、"逆着水柱往上"贵(原版按住跳的上浮稳态 0.2 格/tick,一格 5 tick)。
- * 它能被规划的前提是执行侧真的按着跳 —— 见
- * {@link MovementHelper#isFloatingAt}(浮着就每 tick 按,浅水涉水不按)。
+ * 它能被规划的前提是执行侧真的按着跳 —— 见 {@link Movement#strokeUp}
+ * (泡在液体里且还没浮到泳道以上就每 tick 按,浅水涉水不按)。
  */
 public final class FlowCost {
 
@@ -196,7 +196,7 @@ public final class FlowCost {
      * 抵消一点点),再叠加 {@link #fallingWaterVerticalAdjust} 的竖直差。于是
      * <b>顺着瀑布往下便宜(甚至比横渡快),逆着水柱往上贵但仍有限</b> —— 与
      * {@link #cost} 同一条道理:水柱也是价,不是墙(前提是执行侧按着跳,见
-     * {@link MovementHelper#isFloatingAt})。
+     * {@link Movement#strokeUp})。
      *
      * @param baseWaterCost 该档"没有水流"的水价({@link CalculationContext#waterWalkSpeed})
      * @param dy            这次移动的净竖直位移(格;向上为正)

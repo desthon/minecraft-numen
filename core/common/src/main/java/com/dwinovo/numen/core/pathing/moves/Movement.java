@@ -199,9 +199,9 @@ public abstract class Movement {
 
     /**
      * 每 tick 推进一次。通用框架:强制关闭飞行能力(走地面物理)→
-     * 子类状态机 → 水中且低于目标高度时强按跳(上浮)→ 卡墙时先换上
-     * 对该方块最优工具再按左键 → 视角与按键交执行层钩子,按键先清
-     * 后设、终态清空。
+     * 子类状态机 → 泡在液体里且还没浮到终点那一层时强按跳(上浮,见
+     * {@link #strokeUp})→ 卡墙时先换上对该方块最优工具再按左键 →
+     * 视角与按键交执行层钩子,按键先清后设、终态清空。
      */
     public MovementStatus update() {
         // 强制关闭飞行能力:寻路执行期走地面物理(跳跃/下落),不被外部
@@ -209,18 +209,21 @@ public abstract class Movement {
         player.getAbilities().flying = false;
         currentState = updateState(currentState);
         BlockPos feet = feet(player);
-        boolean feetInLiquid = MovementHelper.isLiquid(player.level().getBlockState(feet));
-        // 浮着(脚与脚下一格都是水)就<b>每 tick</b> 按跳 —— 原版 LivingEntity.aiStep 里
-        // 按跳在液体中走的是 jumpInLiquid(每 tick +0.04 的划水),正是浮力:身体因此稳在
-        // 水面附近,不会一路沉到湖底"如履平地";而下落水柱的推力竖直向下,也正是这一点
-        // 上浮冲量让人能逆着水柱游上去(这是本轮把水柱从"墙"改成"价"的前提)。
+        // 浮力:<b>身体泡在液体里</b>就按跳 —— 原版 LivingEntity.aiStep 里按跳在液体中
+        // 走的是 jumpInFluid(每 tick +0.04 的划水),正是浮力:身体因此稳在泳道那一层,
+        // 不会一路沉到湖底"如履平地";而下落水柱的推力竖直向下,也正是这一点上浮冲量
+        // 让人能逆着水柱游上去(这是把水柱从"墙"改成"价"的前提)。
         //
-        // 只对<b>浮着</b>的身体按:浅水涉水时脚踩得到底,持续按跳会变成一路蹦
-        // (那里本来就不减速,见 WaterCost 的涉水档)。原来那条"低于目标才按"的判据
-        // 留着,是为了别在往下走时跟重力对拉。
-        boolean floating = MovementHelper.isFloatingAt(player.level(), ChunkLoadedTest.ALWAYS,
-                feet.getX(), feet.getY(), feet.getZ());
-        if (feetInLiquid && (floating || player.getY() < dest.getY() + 0.6)) {
+        // 判据<b>不能</b>是"脚那一格是不是水":浮在水面时脚正好落在水面上方那一格
+        // (空气)里 —— 恰恰是最该上浮的状态,那条判据为假,泳道因此永远浮不住
+        // (实机:泳道节点 63、水面水格 62,身体只能停在 62,每 21 刻判一次脱轨)。
+        // 也不能一看"浮着"就无条件按:泳道在下方时那样会一直跟重力对拉,下潜不下去。
+        // 现在用的是实体自己的液体状态(与 InputDriver.jump 里那一问同一把尺)+
+        // "还没浮到泳道以上"。
+        boolean inLiquid = player.isInWater() || player.isInLava();
+        // 水有没有没到身体:脚上面那格还是液体。浅水里它是假 —— 那条路叫涉水。
+        boolean liquidAboveFeet = MovementHelper.isLiquid(player.level().getBlockState(feet.above()));
+        if (strokeUp(inLiquid, player.onGround(), liquidAboveFeet, player.getY(), dest.getY())) {
             currentState.setInput(Input.JUMP, true);
         }
         if (player.isInWall()) {
@@ -244,6 +247,38 @@ public abstract class Movement {
             clearInputs();
         }
         return currentState.getStatus();
+    }
+
+    /**
+     * 浮力闸门(纯判据,可单测):这一 tick 要不要按跳划水。
+     *
+     * <p>液体里按住跳 = 原版 {@code jumpInFluid} 每 tick +0.04 的上浮冲量
+     * (见 {@code InputDriver.jump});这是身体停在泳道那一层、以及逆着下落水柱游上去的
+     * 唯一来源。判据的两头别搞反:
+     * <ul>
+     *   <li>"在液体里"问的是<b>实体自己的液体状态</b>,不是"脚那一格是水" —— 浮在水面时
+     *       脚正好在水面上方那一格(空气)里,按格问必然为假,身体就浮不住;</li>
+     *   <li>"没到泳道以上才划" —— 已经浮到本动作终点那一层(或本来就要往下走)还继续划,
+     *       就会跟重力对拉,下潜与"水面下一格"的泳位都到不了。</li>
+     * </ul>
+     *
+     * @param inLiquid        身体泡在液体里(实体自己的液体状态)
+     * @param onGround        脚踩得到底
+     * @param liquidAboveFeet 水没到身体:脚上面那一格还是液体
+     * @param playerY         身体高度(脚下沿)
+     * @param destY           本动作终点格的 y:它那一层才是要浮住的泳道
+     */
+    public static boolean strokeUp(boolean inLiquid, boolean onGround, boolean liquidAboveFeet,
+                                   double playerY, int destY) {
+        if (!inLiquid) {
+            return false;
+        }
+        if (onGround && !liquidAboveFeet) {
+            return false; // 浅水涉水:踩得到底、水没到身体 —— 按跳只会一路蹦
+        }
+        // 深水里踩得到底(湖底)照按:那是要从水底浮上去。但如果已经浮到泳道以上
+        // (或本来就要往下走),再按就是跟重力对拉 —— 下潜和下到水面下一格都到不了。
+        return playerY < destY + 0.6;
     }
 
     /** 玩家准星当前命中的方块状态;未命中返回 null。 */

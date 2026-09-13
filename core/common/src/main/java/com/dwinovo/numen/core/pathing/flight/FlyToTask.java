@@ -43,16 +43,36 @@ public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
 
     @Override
     protected void onStart() {
-        if (WorkProfile.of(player).grantFlight(player)) {
-            com.dwinovo.numen.core.Constants.LOG.info(
-                    "[numen-task] fly_to:画像说她能飞,但 abilities.mayfly 是 false —— 已补上");
-        }
-        if (!player.getAbilities().mayfly) {
-            fail("I cannot fly: my abilities say mayfly=false. Flight is a creative-mode"
-                    + " ability — ask the owner to put me in creative, or use goto and I will"
-                    + " walk (or swim, or take a boat) instead.", FailureType.UNSUPPORTED);
+        // 第一道闸:档位本身允不允许飞(创造/旁观)。<b>先判档位再补能力位</b>——
+        // 顺序反过来的话,补能力位这一步本身就成了"生存档也能飞"的入口:
+        // WorkProfile 的画像按 instabuild 推,而 instabuild 是从 .dat 读回来的上一次的事实。
+        if (!FlightPermit.modeGrantsFlight(player)) {
+            fail(FlightPermit.refusal(player), FailureType.UNSUPPORTED);
             return;
         }
+        // 档位确实允许:这时才允许把落下的能力位补回来(原版 setGameMode 在同档时会
+        // 提前返回、压根不碰 abilities,那是 mayfly 会落后于模式的来源)。
+        if (WorkProfile.of(player).grantFlight(player)) {
+            com.dwinovo.numen.core.Constants.LOG.info(
+                    "[numen-task] fly_to:档位允许飞,但 abilities.mayfly 是 false —— 已补上");
+        }
+        // 第二道闸:两把锁都开了才真的起飞
+        if (!FlightPermit.of(player)) {
+            fail(FlightPermit.refusal(player), FailureType.UNSUPPORTED);
+            return;
+        }
+        // 飞行期间按住"脱困"本能(名字要对上 UnstuckChain.name())。
+        //
+        // <p>它的判据是"一直在推、却一直没动"(40 刻窗口),而那正是一条正在飞的航线
+        // 会短暂呈现的样子:在狭处抬升、贴着地形低速巡航。<b>更糟的是它接手的方式</b>:
+        // halt(把飞行输入清零) + 朝随机方向的地面步态走出去,而任务被它抢占时
+        // FlyToTask.stop 会顺手停飞——于是"飞行 → 被本能当成卡住 → 停飞并被带着走 →
+        // 重新起飞"成了一个环,起点是它、受害的是航线。
+        //
+        // <p>飞行的"飞不动"由 FlightDrive 自己的卡住判定如实收场,那条判据比这条本能
+        // 细(它知道当前是哪一段、一共走了几格、前面那一格是不是空气)。按住是临时的:
+        // 她闲下来时 CompanionBrain 会统一解除(见 NumenPlayer.pauseReflex)。
+        player.pauseReflex("unstuck");
         long now = player.level().getGameTime();
         double dist = Math.sqrt(player.distanceToSqr(r.x, player.getY(), r.z));
         r.extendDeadlineTo(now + Math.min(MAX_EXTRA_TICKS, 600 + (long) (dist * TICKS_PER_BLOCK)));

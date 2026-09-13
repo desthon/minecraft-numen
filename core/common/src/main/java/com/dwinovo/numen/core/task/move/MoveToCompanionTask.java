@@ -7,6 +7,9 @@ import com.dwinovo.numen.task.TaskState;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.core.pathing.calc.NavGoal;
 import com.dwinovo.numen.core.pathing.execute.PlayerNav;
+import com.dwinovo.numen.core.pathing.flight.AutoFlight;
+import com.dwinovo.numen.core.pathing.flight.FlightLeg;
+import com.dwinovo.numen.core.pathing.flight.FlightPermit;
 import com.dwinovo.numen.core.task.base.AbstractCompanionTask;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -102,6 +105,20 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     /** 船腿没成的原因,收尾文案里如实带上。"" = 没试过或者成了。 */
     private String boatNote = "";
 
+    // ---- 自动飞行腿(见 AutoFlight:创造档下自己判断该飞就飞) ----
+    /** 正在飞的那一腿;null = 没在飞。 */
+    private FlightLeg flightLeg;
+    /** 这一趟已经插过飞行腿了。<b>一票制</b>:飞不成不再重试,回到地面那条路。 */
+    private boolean flightTried;
+    /** 起这一腿时的地面路况:无路 → 飞行腿是唯一的路;路太长 → 它只是加餐。 */
+    private boolean groundRouteBlocked;
+    /** 飞行腿为什么起/为什么没成,回执里如实带上。"" = 没插过。 */
+    private String flightNote = "";
+    /** 起步时到目标的直线距离——外推地面路总长要用它当基准(见 AutoFlight)。 */
+    private double startStraight = Double.NaN;
+    /** 下一次问"要不要改飞"的时刻:判据每刻问一次会刷屏,而"路有多长"本来就不按刻变。 */
+    private long nextFlightCheck;
+
     // ---- 活目标(Kind.ENTITY)。见 LiveTarget:坐标是事件,不是状态。 ----
     /** 最近一次解析到的目标实体;null = 解析不到(离线/没了/换层)。 */
     private Entity liveTarget;
@@ -141,6 +158,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
                 return;
             }
         }
+        startStraight = straightDistance();
         if (r.kind == MoveToTaskRecord.Kind.FIND) {
             // 就近方块:解析 id → 离线扫描附近候选;导航等首批候选到手再建
             var id = net.minecraft.resources.ResourceLocation.tryParse(r.block);
@@ -178,6 +196,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
      * 两个入口一份逻辑。
      */
     private void startWalkingNav() {
+        startStraight = straightDistance();
         // Initial budget from straight-line distance (terrain difficulty is unknowable
         // here — the progress lease below takes over once the journey is under way).
         long extra = Math.min(MAX_EXTRA_TICKS, 600 + (long) (repDistance() * TICKS_PER_BLOCK));
@@ -292,6 +311,9 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         // reached() is checked BEFORE the nav==null guard so an already-at-target start
         // (which never builds a nav) lands on SUCCESS rather than the defensive FAILED.
         if (reached()) return TaskState.SUCCESS;
+        if (flightLeg != null) {
+            return tickFlightLeg();
+        }
         if (crossing != null) {
             return tickCrossing();
         }
@@ -328,6 +350,12 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
             settleTicks = 0;
         } else {
             settleTicks++;
+        }
+        // 地面这条路已经走了很久:按已走的进度外推整条路的长度,若剩下的飞着去明显更快,
+        // 就插一条飞行腿(判据与阈值见 AutoFlight)。它只在"路确实明显更长"时成立 ——
+        // 短途与正常路面都过不了那道门槛,所以不会出现"一直飘"。
+        if (considerFlightOnLongRoute()) {
+            return TaskState.RUNNING;
         }
         return switch (nav.tick()) {
             case RUNNING -> TaskState.RUNNING;
@@ -370,11 +398,18 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
                             terrain()).withTerrainProbe();
                     yield TaskState.RUNNING;
                 }
+                // 无路可走而她能飞:直线飞过去就是"这条路本来不存在"的正解(见 AutoFlight)。
+                // 摆在船腿与放宽半径那两级之后 —— 飞行是最后一条路,不是第一条。
+                if ((nav.failType() == FailureType.NO_PATH
+                        || nav.failType() == FailureType.TERRAIN_BLOCKED)
+                        && startFlightLeg(AutoFlight.Route.BLOCKED, 0, nav.failReason())) {
+                    yield TaskState.RUNNING;
+                }
                 String also = nearRetried
                         ? " (also retried accepting anywhere within "
                                 + (int) NEAR_SUCCESS_RADIUS + " blocks — no path either)"
                         : "";
-                fail(blockedMessage(nav.failReason() + also), nav.failType());
+                fail(blockedMessage(nav.failReason() + also) + flightNote, nav.failType());
                 yield TaskState.FAILED;
             }
         };
@@ -488,6 +523,158 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         stopNav();
         startCrossing(BoatCrossing.fromShore(player, blockTarget, terrain(), survey));
         return true;
+    }
+
+
+    // ==================== 自动飞行腿(见 AutoFlight) ====================
+
+    /**
+     * 走地面路这么久之后才值得问"这条路到底有多长"(5 秒)。
+     *
+     * <p>太早问会拿"刚起步"的进度外推,算出来的是噪声;5 秒够走二十来格,也够看出
+     * 这条路是在绕(外推用的就是"走了这么多刻才推进了这么点")。
+     */
+    private static final int FLIGHT_SWITCH_AFTER_TICKS = 100;
+
+    /** 之后每这么多刻重问一次(2 秒)。问一次要读一次进度、写一行日志,不该每刻都来。 */
+    private static final int FLIGHT_RECHECK_TICKS = 40;
+
+    /** 到目标的直线距离(水平)。飞行判据里的"直线"就是这个数。 */
+    private double straightDistance() {
+        return Math.sqrt(horizontalDistSqr(bx, bz));
+    }
+
+    /** 这一趟已经跑了多少刻。 */
+    private long elapsedTicks() {
+        return Math.max(0, player.level().getGameTime() - r.getStartedGameTime());
+    }
+
+    /**
+     * 地面路走了很久,要不要改飞:用"已经朝目标推进了多少"外推整条路的长度,再问
+     * "剩下的飞着去是不是明显更快"。
+     *
+     * <p>外推而不是问寻路器要长度:寻路器给的是"通不通",不是"多长";而"这条路明显比
+     * 直线长"恰恰是一段路走下来才看得出来的事实。
+     */
+    private boolean considerFlightOnLongRoute() {
+        if (flightTried || !hasFixedDestination() || Double.isNaN(startStraight)) {
+            return false;
+        }
+        // 第一道判据(档位 + mayfly + 没骑东西):不成立就整条飞行路径短路,
+        // 后面连"路有多长"都不必算 —— 生存档在实机里连这里都不进。
+        if (!FlightPermit.of(player)) {
+            return false;
+        }
+        long elapsed = elapsedTicks();
+        if (elapsed < FLIGHT_SWITCH_AFTER_TICKS) {
+            return false;
+        }
+        long now = player.level().getGameTime();
+        if (now < nextFlightCheck) {
+            return false;   // 两秒问一次就够:这条路有多长不会按刻变
+        }
+        nextFlightCheck = now + FLIGHT_RECHECK_TICKS;
+        double remaining = straightDistance();
+        double covered = Math.max(0.0, startStraight - Math.min(bestDist, startStraight));
+        double total = AutoFlight.estimateGroundLength(startStraight, covered, elapsed);
+        if (Double.isNaN(total)) {
+            return false;
+        }
+        double remainingGround = Math.max(remaining, total - covered);
+        return startFlightLeg(AutoFlight.Route.KNOWN, remainingGround, null);
+    }
+
+    /**
+     * 起一条飞行腿。判据是纯的({@link AutoFlight}),这里只喂事实、记日志、换腿。
+     *
+     * <p><b>一票制</b>({@link #flightTried}):这一趟只插一次。同一片天上第二次也飞不过去,
+     * 而重试只会让她在半空里来回换腿。
+     *
+     * @param route     地面路况:{@link AutoFlight.Route#BLOCKED} = 本来就没有路,
+     *                  {@link AutoFlight.Route#KNOWN} = 有路但明显更长
+     * @param groundWhy 无路可走时导航给的原因(挂进回执:地面那边到底怎么了)
+     * @return 真的起了腿(调用方本刻改成 RUNNING)
+     */
+    private boolean startFlightLeg(AutoFlight.Route route, double groundLength, String groundWhy) {
+        if (flightTried || !hasFixedDestination() || player.isPassenger()) {
+            return false;
+        }
+        // 第一道判据:<b>她此刻到底能不能飞</b>(档位 + mayfly + 没骑东西,见 FlightPermit)。
+        // 生存档到这里就回头,长度、路况、绕行比例一概不看 —— 这是"生存档一字不进飞行"
+        // 最外面那道闸。
+        boolean canFly = FlightPermit.of(player);
+        if (!canFly) {
+            com.dwinovo.numen.core.Constants.LOG.info(
+                    "[numen-task] goto 不起飞行腿:{}", FlightPermit.refusal(player));
+            return false;
+        }
+        AutoFlight.Verdict verdict =
+                AutoFlight.decide(canFly, straightDistance(), route, groundLength);
+        com.dwinovo.numen.core.Constants.LOG.info("[numen-task] goto 飞行判据:{}", verdict.why());
+        if (!verdict.fly()) {
+            return false;
+        }
+        // 飞向目标"列"(列心的地面):BLOCK 要的那一格(以及最后几格)由飞完之后的步行补上
+        FlightLeg leg = FlightLeg.launch(player, bx + 0.5, bz + 0.5);
+        if (leg == null) {
+            // 起腿那一刻许可没了(理论上到不了这里:刚判过):留一道,如实说
+            com.dwinovo.numen.core.Constants.LOG.info(
+                    "[numen-task] goto 飞行腿没起成:{}", FlightPermit.refusal(player));
+            return false;
+        }
+        flightTried = true;
+        groundRouteBlocked = route == AutoFlight.Route.BLOCKED;
+        flightNote = " (took the air: " + verdict.why()
+                + (groundWhy == null ? "" : " — on the ground: " + groundWhy) + ")";
+        stopNav();
+        com.dwinovo.numen.core.Constants.LOG.info(
+                "[numen-task] goto 改走飞行腿 → x={} z={}", bx, bz);
+        flightLeg = leg;
+        return true;
+    }
+
+    /**
+     * 飞行腿的一刻。三种收场:
+     * <ul>
+     *   <li><b>还在飞</b>——本刻到此为止;</li>
+     *   <li><b>落到了</b>——到了就是到了(BLOCK 要的那一格、活目标旁边的位置由步行补,
+     *       见 {@link #startWalkingNav()});</li>
+     *   <li><b>没成</b>——地面那条路还在就接着走(插一腿是加餐,不是换饭碗);地面本来
+     *       就没有路,那这一趟是真的到不了,如实收场。</li>
+     * </ul>
+     */
+    private TaskState tickFlightLeg() {
+        switch (flightLeg.tick(player)) {
+            case RUNNING -> {
+                return TaskState.RUNNING;
+            }
+            case ARRIVED -> {
+                flightLeg = null;
+                if (reached()) {
+                    return TaskState.SUCCESS;
+                }
+                startWalkingNav();
+                return TaskState.RUNNING;
+            }
+            case FAILED -> {
+                String why = flightLeg.failReason();
+                FailureType type = flightLeg.failType();
+                flightLeg = null;
+                if (!groundRouteBlocked) {
+                    com.dwinovo.numen.core.Constants.LOG.info(
+                            "[numen-task] goto 飞行腿没成({}),接回步行", why);
+                    flightNote = flightNote + " — the flight leg did not work out (" + why
+                            + "), so I walked the rest";
+                    startWalkingNav();
+                    return TaskState.RUNNING;
+                }
+                fail("blocked: " + why + flightNote, type);
+                return TaskState.FAILED;
+            }
+            default -> {
+                return TaskState.RUNNING;
+            }
+        }
     }
 
     /** 这次 goto 有固定终点(方块/地点)吗。活目标与 FIND 的终点由它们自己决定。 */
@@ -698,6 +885,10 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         if (boatTried) {
             data.put("boat_leg", boatNote.isEmpty() ? "crossed by boat" : boatNote.strip());
         }
+        // 这一趟有没有自己改走空中,是"回放刚才那段路"时最容易被怀疑的一环,照 boat_leg 的规矩带上
+        if (flightTried) {
+            data.put("flight_leg", flightNote.isEmpty() ? "flew part of the way" : flightNote.strip());
+        }
         return data;
     }
 
@@ -709,7 +900,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
      */
     @Override
     protected String successMessage() {
-        return arrivalMessage() + boatNote;
+        return arrivalMessage() + boatNote + flightNote;
     }
 
     private String arrivalMessage() {
@@ -795,6 +986,10 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     @Override
     protected void cleanup() {
         super.cleanup();
+        if (flightLeg != null) {
+            flightLeg.stop();   // 收尾不留一个悬在半空的身体
+            flightLeg = null;
+        }
         if (finder != null) {
             finder.cancelScan();
         }

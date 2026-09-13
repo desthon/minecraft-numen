@@ -5,8 +5,10 @@ import static com.dwinovo.numen.task.TaskDispatch.setTask;
 
 import com.dwinovo.numen.agent.tool.NumenTool;
 import com.dwinovo.numen.agent.tool.Schema;
+import com.dwinovo.numen.core.pathing.flight.FlightPermit;
 import com.dwinovo.numen.core.pathing.flight.FlyToTaskRecord;
 import com.dwinovo.numen.entity.NumenPlayer;
+import com.dwinovo.numen.task.TaskResult;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
@@ -44,7 +46,7 @@ public final class FlyTool implements NumenTool {
     @Override
     public String description() {
         return """
-                Fly in a STRAIGHT LINE to a place and land on the ground there — the fast way to cross distance when you can fly. Check get_self_status first: flight is a creative-mode ability, and in survival this call fails immediately (mayfly=false) instead of pretending.
+                Fly in a STRAIGHT LINE to a place and land on the ground there — the fast way to cross distance when you can fly. Check get_self_status first: flight is a creative-mode ability, and in survival this call is REFUSED at the door with the reason (which mode I am in and which ability bit is missing) instead of pretending — nothing is queued, and use goto instead.
                 Which fields you fill IS your intent — fill exactly one pattern:
                 • x+z — the column to fly to. Do NOT send y: she cruises as low as the terrain allows and settles down onto whatever surface is in that column. This is the default for "fly over there".
                 • x+y+z — the same, but cruise at that height. y is the FLIGHT height, not the final standing height: she still lands on the ground in that column. Use it when you know the low route is blocked and know a clear altitude.
@@ -67,6 +69,15 @@ public final class FlyTool implements NumenTool {
     @Override
     public void onServerCall(String toolCallId, JsonObject args, NumenPlayer companion,
                              Consumer<String> reply) {
+        // 闸门摆在<b>工具入口</b>,不是摆在任务里:放进任务就变成"活已经受理、飞行代码
+        // 已经跑起来,只是最后失败" —— 那正是实机 bug「生存档仍然调用飞行代码」的形态。
+        // 这里当场给人话拒绝:不建任务、不碰 abilities、一个飞行输入都不发。
+        // 判据是两把锁(档位 + mayfly + 没骑东西,见 FlightPermit),不是只看 mayfly
+        // 那个可能还留着 true 的脏能力位。
+        if (!FlightPermit.of(companion)) {
+            reply.accept(TaskResult.fail(FlightPermit.refusal(companion)).toJson());
+            return;
+        }
         Args a = GSON.fromJson(args, Args.class);
         setTask(companion, new FlyToTaskRecord(toolCallId,
                 ctx(toolCallId, companion).deadline(DEFAULT_TIMEOUT_TICKS),

@@ -327,7 +327,13 @@ public class MovementTraverse extends Movement {
                     return state.setStatus(MovementStatus.UNREACHABLE);
                 }
             }
-            AimGeometry.moveTowards(player, state, against);
+            if (MovementHelper.isLiquid(level.getBlockState(feet))) {
+                // 在水里:平视着游(见 AimGeometry.moveTowardsLevel)—— 俯仰在水里就是
+                // 竖直速度的目标,镜头压着水面下方看就一路下潜,浮力顶不回来。
+                AimGeometry.moveTowardsLevel(player, state, against);
+            } else {
+                AimGeometry.moveTowards(player, state, against);
+            }
             return state;
         } else {
             // 搭桥执行:桥块不在(或被挖掉了),现场放

@@ -2,6 +2,9 @@ package com.dwinovo.numen.core.task.move;
 
 import com.dwinovo.numen.core.pathing.calc.NavGoal;
 import com.dwinovo.numen.core.pathing.execute.PlayerNav;
+import com.dwinovo.numen.core.pathing.flight.AutoFlight;
+import com.dwinovo.numen.core.pathing.flight.FlightLeg;
+import com.dwinovo.numen.core.pathing.flight.FlightPermit;
 import com.dwinovo.numen.core.pathing.moves.MovementHelper;
 import com.dwinovo.numen.core.task.base.AbstractCompanionTask;
 import com.dwinovo.numen.entity.NumenPlayer;
@@ -82,6 +85,14 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
     /** 当前这次规划所依据的那份读数——判"过期了该重新解析"用({@link LiveTarget#stale})。 */
     private LiveTarget.Fix fix;
 
+    // ---- 走不过去时的那一腿飞行(见 AutoFlight;只在"地面根本没有路"时改飞) ----
+    /** 正在飞的那一腿;null = 没在飞。 */
+    private FlightLeg flightLeg;
+    /** 这一程已经试过飞行。<b>一程一票</b>:她重新跟到身边之后,下一程还能再飞。 */
+    private boolean flightTried;
+    /** 飞这一腿的原因/结果,收尾文案里如实带上。"" = 没飞过。 */
+    private String flightNote = "";
+
     public FollowCompanionTask(NumenPlayer player, FollowTaskRecord record) {
         super(player, record);
     }
@@ -116,11 +127,15 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
     protected TaskState onTick() {
         LiveTarget.Presence now = presence();
         if (now != LiveTarget.Presence.HERE) {
+            stopFlightLeg();
             stopNav();
             moving = false;
             return reportMissing(now);
         }
         Entity target = liveTarget;
+        if (flightLeg != null) {
+            return tickFlightLeg();
+        }
         long gameTime = player.level().getGameTime();
         if (nav == null) {
             // 目标每次重规划时现取,所以主人边走她也跟得上。地形许可按记录来,默认只走不改;
@@ -150,17 +165,115 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
                 // 够不着就是这件活的结果:原因与清单交给模型,别攥着站在原地空算
                 String why = nav.failReason();
                 FailureType type = nav.failType();
+                boolean blocked = type == FailureType.NO_PATH || type == FailureType.TERRAIN_BLOCKED;
                 stopNav();
-                fail("can't keep up: " + why, type);
+                // 走不过去而她会飞:直线飞过去(判据与 goto 同一套,见 AutoFlight)。
+                // <b>只在"地面根本没有路"时改飞</b>——"有路但是绕"这一种在跟随里不插腿:
+                // 主人一直在动,而飞行腿的落点是"此刻那一列"的地面,跟着飞很容易变成
+                // 一路飘。飞到了接着跟;飞不成再如实收场。
+                if (blocked && startFlightLeg(why)) {
+                    return TaskState.RUNNING;
+                }
+                fail("can't keep up: " + why + flightNote, type);
                 return TaskState.FAILED;
             }
         }
         if (closeEnough()) {
             stopNav();
             moving = false;
+            flightTried = false;   // 她重新跟到身边 = 新的一程,下一程还能再飞
+            flightLegs = 0;
         }
         // 不返终态就是"常驻"的全部含义;只有够不着和目标没了才收场。
         return TaskState.RUNNING;
+    }
+
+    // ==================== 走不过去时的那一腿飞行(见 AutoFlight) ====================
+
+    /**
+     * 一趟追赶里最多飞几腿(3)。
+     *
+     * <p>追人不可能靠无限次起飞:每一次起降都要抬起、落下,次数一多,她看上去就是
+     * 一路飘着——那正是主人不要的样子。三次还追不上,就如实报"跟不上"。
+     */
+    private static final int MAX_FLIGHT_LEGS_PER_CHASE = 3;
+    /** 本程(上一次跟到身边之后)已经飞了几腿。 */
+    private int flightLegs;
+
+    /**
+     * 地面没有路时插一腿直飞。判据是纯的({@link AutoFlight}),这里只喂事实。
+     *
+     * <p>飞的是<b>目标此刻站着的那一列</b>的地面({@link #anchor}):人是动的,所以这一腿
+     * 的终点天然是个快照——飞完接着跟,下一腿再按那时的位置重算。
+     */
+    private boolean startFlightLeg(String groundWhy) {
+        Entity target = liveTarget;
+        if (target == null || flightLeg != null || flightTried
+                || flightLegs >= MAX_FLIGHT_LEGS_PER_CHASE) {
+            return false;
+        }
+        // 第一道判据:她此刻到底能不能飞(档位 + mayfly + 没骑东西,见 FlightPermit)。
+        // 生存档在这里回头,后面的距离判据一个字都不看。
+        boolean canFly = FlightPermit.of(player);
+        if (!canFly) {
+            com.dwinovo.numen.core.Constants.LOG.info(
+                    "[numen-task] follow 不起飞行腿:{}", FlightPermit.refusal(player));
+            return false;
+        }
+        double straight = Math.sqrt(player.distanceToSqr(target.position()));
+        AutoFlight.Verdict verdict = AutoFlight.decide(canFly, straight,
+                AutoFlight.Route.BLOCKED, 0);
+        com.dwinovo.numen.core.Constants.LOG.info("[numen-task] follow 飞行判据:{}", verdict.why());
+        if (!verdict.fly()) {
+            return false;
+        }
+        BlockPos at = anchor(target);
+        FlightLeg leg = FlightLeg.launch(player, at.getX() + 0.5, at.getZ() + 0.5);
+        if (leg == null) {
+            com.dwinovo.numen.core.Constants.LOG.info(
+                    "[numen-task] follow 飞行腿没起成:{}", FlightPermit.refusal(player));
+            return false;
+        }
+        flightTried = true;
+        flightLegs++;
+        flightNote = " (took the air: " + verdict.why() + " — on the ground: " + groundWhy + ")";
+        com.dwinovo.numen.core.Constants.LOG.info(
+                "[numen-task] follow 改走飞行腿 → x={} z={}", at.getX(), at.getZ());
+        flightLeg = leg;
+        return true;
+    }
+
+    /** 飞行腿的一刻:飞到就回到跟随(下一腿按那时的位置重算),飞不成接回地面。 */
+    private TaskState tickFlightLeg() {
+        switch (flightLeg.tick(player)) {
+            case RUNNING -> {
+                return TaskState.RUNNING;
+            }
+            case ARRIVED -> {
+                stopFlightLeg();
+                flightTried = false;   // 这一腿结束了:若还是走不过去,可以再飞一腿(有上限)
+                moving = false;        // 目标早动过了:让下面按此刻的位置重开导航
+                return TaskState.RUNNING;
+            }
+            case FAILED -> {
+                String why = flightLeg.failReason();
+                FailureType type = flightLeg.failType();
+                stopFlightLeg();
+                fail("can't keep up: " + why + flightNote, type);
+                return TaskState.FAILED;
+            }
+            default -> {
+                return TaskState.RUNNING;
+            }
+        }
+    }
+
+    /** 收掉飞行腿(停飞;幂等)。 */
+    private void stopFlightLeg() {
+        if (flightLeg != null) {
+            flightLeg.stop();
+            flightLeg = null;
+        }
     }
 
     /** 建导航,并把"这次规划依据的那份读数"记成此刻的位置。 */
@@ -265,6 +378,18 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
     private boolean closeEnough() {
         Entity target = liveTarget;
         return target != null && player.position().distanceTo(target.position()) <= r.keepWithin;
+    }
+
+    /**
+     * 收尾:飞行腿与导航都不留。
+     *
+     * <p>飞行腿这一条尤其重要——被换掉/被取消时留着它,就是留着一个"还在飞"的身体:
+     * 飞行分支不施重力,她会挂在半空等下一件活(见 {@code FlyToTask.stop} 的同一处理)。
+     */
+    @Override
+    protected void cleanup() {
+        stopFlightLeg();
+        super.cleanup();
     }
 
     @Override

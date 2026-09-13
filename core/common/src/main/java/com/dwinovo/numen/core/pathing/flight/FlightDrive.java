@@ -27,7 +27,11 @@ import net.minecraft.world.phys.Vec3;
  * <h2>坏相怎么收场</h2>
  * <ul>
  *   <li><b>飞不动</b>(顶在墙上、被压在方块里):连续 {@link FlightPlan#STALL_TICKS}
- *       刻位置不变 → FAILED,并点名挡在前面的那一格;</li>
+ *       刻位置不变 → FAILED。<b>要区分"有东西挡着"与"推了却没动"</b>:后者是驱动故障,
+ *       回执照实说"前面那一格是空的、我推了没动",不能让模型去绕一条根本不存在的路;</li>
+ *   <li><b>落不下去</b>:下落段的竖直推力<b>不带死区</b>(见
+ *       {@link FlightPlan#descentThrust}),到 {@link FlightPlan#reachedLandingHeight}
+ *       就停飞——飞行分支不施重力,靠死区"接近就停推"会让她永远悬在地面上方几十厘米处;</li>
  *   <li><b>路变了</b>(半路被人砌了一堵墙):每 {@link #RECHECK_TICKS} 刻按当前世界
  *       复核剩余航段 → FAILED,点名挡路的格子;</li>
  *   <li><b>不让飞了</b>(切回生存/能力被收回):当刻就停飞落地,如实说"我的飞行被收回
@@ -62,6 +66,11 @@ public final class FlightDrive {
     private Status terminalStatus;
     private int stallTicks;
     private int ticks;
+    private int phaseTicks;
+    /** 起飞点(诊断用):卡住时"我一共走了几格"要算得出来。 */
+    private double takeoffX;
+    private double takeoffY;
+    private double takeoffZ;
     private double lastX;
     private double lastY;
     private double lastZ;
@@ -80,13 +89,16 @@ public final class FlightDrive {
         if (terminalStatus != null) {
             return terminalStatus;
         }
-        // 飞行许可每一刻都现读:模式可以被 /gamemode 或主人随时改掉,改掉就落地
-        if (!FlightPlan.canFly(player.getAbilities().mayfly, player.isPassenger())) {
-            return fail("my flight permission is gone (mayfly=" + player.getAbilities().mayfly
-                    + (player.isPassenger() ? ", and I am riding something" : "")
-                    + ") — I stopped and came down where I was. Flight comes from creative"
-                    + " mode; ask for it again, or use goto for the rest of the way.",
-                    FailureType.INTERRUPTED);
+        // 飞行许可<b>每一刻都现读</b>:档位可以被 /gamemode 或主人随时改掉,改掉就落地。
+        //
+        // 判据是两把锁(档位 + mayfly,见 FlightPermit/FlightPlan.canFly),不是只看 mayfly
+        // ——能力位是从 .dat 读回来的上一次的事实,生存档下可能还留着 true。不在这里拦住,
+        // 一具生存档的身体就会被继续推着飞(实机 bug「生存档仍然调用飞行代码」)。
+        // fail() 会走 stop() → flightStop:这一位当刻清掉,不留悬停。
+        if (!FlightPermit.of(player)) {
+            return fail("my flight permission is gone (" + FlightPermit.refusal(player)
+                    + ") — I stopped and came down where I was. Use goto for the rest of"
+                    + " the way.", FailureType.INTERRUPTED);
         }
         // 上一刻不在飞(第一次接手,或者被本能/同步动作抢占过):按<b>现在的位置</b>重规划。
         // 拿旧航线接着飞是错的:她已经被放到别处了,旧航线未必还通,通的那条也未必还在那。
@@ -101,11 +113,12 @@ public final class FlightDrive {
             return Status.FAILED;
         }
 
+        phaseTicks++;
         switch (phase) {
             case LIFT -> {
                 int dir = FlightPlan.verticalThrust(player.getY(), plan.cruiseY());
                 if (dir == 0) {
-                    phase = Phase.CRUISE;
+                    enterPhase(Phase.CRUISE);
                 } else {
                     InputDriver.flyVertical(player, dir);
                 }
@@ -115,29 +128,32 @@ public final class FlightDrive {
                 InputDriver.flyToward(player, new Vec3(tx + 0.5, aimY, tz + 0.5),
                         FlightPlan.verticalThrust(player.getY(), aimY));
                 if (FlightPlan.arrivedHorizontally(player.getX(), player.getZ(), tx + 0.5, tz + 0.5)) {
-                    phase = Phase.DROP;
+                    enterPhase(Phase.DROP);
                 }
             }
             case DROP -> {
-                if (player.onGround() || player.isInWater()) {
-                    InputDriver.halt(player);
-                    InputDriver.flightStop(player);
-                    terminalStatus = Status.ARRIVED;
-                    Constants.LOG.info("[numen-fly] 落地 x={} y={} z={} (巡航 y={},落点 y={})",
-                            (int) Math.floor(player.getX()), (int) Math.floor(player.getY()),
-                            (int) Math.floor(player.getZ()), plan.cruiseY(), plan.landingY());
-                    return Status.ARRIVED;
-                }
-                // 计划里那一格地面没了(别人把地板挖了 / 计划本来就踩在别人刚放的东西上):
-                // 落不下去就得说出来,不能一路沉到底还以为自己"到了"。
+                // 顺序有意义:"地面没了"先判。反过来(先判落地)的话,别人把落脚点挖掉、
+                // 她一路沉下去的那几刻会被判成"离那一格很近 = 到了",报一个假成功。
                 if (player.getY() < plan.landingY() - MISSED_LANDING_MARGIN) {
                     return fail("the ground I planned to land on is gone: I was dropping onto"
                             + " y=" + plan.landingY() + " and I am already at y="
                             + (int) Math.floor(player.getY()) + ". I stopped flying — I fall the"
                             + " rest of the way.", FailureType.BOXED_IN);
                 }
+                // 到点三选一:真的踩到地了 / 落到水里 / 进到落脚点上方那四分之一格里
+                // <b>且那一格此刻还站得住</b>。最后那半句是防"计划的地面没了"被误判成功:
+                // 别人把落脚点挖掉时,她进到那条带子里照样判"到了",然后掉进坑里。
+                boolean groundStillThere = FlightPlan.standable(tx, plan.landingY(), tz, this::solid);
+                if (player.onGround() || player.isInWater()
+                        || (groundStillThere
+                                && FlightPlan.reachedLandingHeight(player.getY(), plan.landingY()))) {
+                    return arrive();
+                }
+                // 落点就在这一列:先把巡航的横向惯性吃掉,再往下推(见 FlightPlan.descentThrust
+                // —— 下落段没有死区,否则她会悬在地面上方几十厘米处再也落不下去)。
+                InputDriver.killHorizontalDrift(player);
                 InputDriver.flyVertical(player,
-                        FlightPlan.verticalThrust(player.getY(), plan.landingY()));
+                        FlightPlan.descentThrust(player.getY(), plan.landingY()));
             }
             default -> throw new IllegalStateException("unknown phase " + phase);
         }
@@ -151,16 +167,64 @@ public final class FlightDrive {
         lastZ = player.getZ();
         if (FlightPlan.stalled(dx, dy, dz)) {
             if (++stallTicks >= FlightPlan.STALL_TICKS) {
-                return fail("I pushed toward " + tx + "," + tz + " for "
-                        + (FlightPlan.STALL_TICKS / 20) + " seconds and did not move a block —"
-                        + " something is in the way (" + describe(aheadCell()) + "). A straight"
-                        + " line is all I can fly: goto would have to walk it, or pick a"
-                        + " different spot.", FailureType.BOXED_IN);
+                return fail(stallReason(), FailureType.BOXED_IN);
             }
         } else {
             stallTicks = 0;
         }
         return Status.RUNNING;
+    }
+
+    /**
+     * 卡住的实话。<b>"我没动"与"有东西挡着"必须分开说</b>。
+     *
+     * <p>这两件事在实机里长得一模一样(位置不变),而下一步动作完全相反:有东西挡着 →
+     * 让模型换目的地或去开路;推了却没动 → 是驱动自己坏了,模型绕多远的路都没用。
+     * 早先这里无论哪种都印"something is in the way(xxx)"并点名格子,而那个格子是
+     * <b>空气</b>——回执把一条驱动侧的故障说成了地形问题。所以这里把三样东西都摊开:
+     * 哪一段、卡了多少刻、一共走过几格,以及前面那一格到底有没有实体方块。
+     */
+    private String stallReason() {
+        BlockPos ahead = aheadCell();
+        boolean aheadSolid = solid(ahead.getX(), ahead.getY(), ahead.getZ());
+        String obstacle = aheadSolid
+                ? "something is in the way (" + describe(ahead) + ")"
+                : "nothing was in the way (" + describe(ahead) + " is open air), so my body"
+                        + " simply produced no movement";
+        return "I did not move for " + (FlightPlan.STALL_TICKS / 20) + " seconds while in the "
+                + phase + " leg: " + obstacle + ". I had covered "
+                + String.format("%.1f", FlightPlan.horizontalDistance(
+                        player.getX(), player.getZ(), takeoffX, takeoffZ))
+                + " blocks from where I took off (y=" + (int) Math.floor(takeoffY) + " → y="
+                + (int) Math.floor(player.getY()) + ") and had been in this leg for " + phaseTicks
+                + " ticks. I stopped flying where I was — nothing is holding me here, so"
+                + " pushing the same route again is pointless: pick another spot, or use goto.";
+    }
+
+    /** 到点:松输入、停飞(不留一个悬在半空的身体),再报到达。 */
+    private Status arrive() {
+        InputDriver.halt(player);
+        InputDriver.flightStop(player);
+        terminalStatus = Status.ARRIVED;
+        Constants.LOG.info("[numen-fly] 落地 x={} y={} z={} (巡航 y={},落点 y={},onGround={})",
+                (int) Math.floor(player.getX()), (int) Math.floor(player.getY()),
+                (int) Math.floor(player.getZ()), plan.cruiseY(), plan.landingY(),
+                player.onGround());
+        return Status.ARRIVED;
+    }
+
+    /**
+     * 换航段。
+     *
+     * <p>每次换段都留一行:"三段里坏的是哪一段"是排障的第一个问题,而位置不动这件事
+     * 在三个航段里长得一模一样——只有这行日志分得开。
+     */
+    private void enterPhase(Phase next) {
+        Constants.LOG.info("[numen-fly] 航段 {}→{} x={} y={} z={} (本段用了 {} 刻)",
+                phase, next, (int) Math.floor(player.getX()), (int) Math.floor(player.getY()),
+                (int) Math.floor(player.getZ()), phaseTicks);
+        phase = next;
+        phaseTicks = 0;
     }
 
     /** 收尾:停飞 + 松输入。任何终态、被取消、被抢占都要走这里(幂等)。 */
@@ -191,8 +255,12 @@ public final class FlightDrive {
         plan = FlightPlan.plan(player.getX(), player.getY(), player.getZ(), tx, tz, requestedCruiseY,
                 level.getMaxBuildHeight(), level.getMinBuildHeight(), this::solid);
         phase = Phase.LIFT;
+        phaseTicks = 0;
         started = true;
         stallTicks = 0;
+        takeoffX = player.getX();
+        takeoffY = player.getY();
+        takeoffZ = player.getZ();
         lastX = player.getX();
         lastY = player.getY();
         lastZ = player.getZ();

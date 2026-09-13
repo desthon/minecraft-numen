@@ -328,4 +328,19 @@ public final class AimGeometry {
         state.setTarget(new MovementState.MovementTarget(yaw, player.getXRot(), false));
         state.setInput(Input.MOVE_FORWARD, true);
     }
+
+    /**
+     * 朝方块中心走,但<b>视线拉平</b>:身体泡在液体里时用这一条。
+     *
+     * <p>为什么水里必须平视:原版 {@code Player.travel} 的游泳分支(疾跑 + 在水里)
+     * 把竖直速度<b>往视线俯仰分量上拉</b>({@code vec.y += (lookY - vec.y) * 0.085}),
+     * 盯着水面下方看就是一路下潜 —— 每 tick +0.04 的浮力顶不回来,人沉到湖底,
+     * 而泳道是横向的一层。平视才等于"朝泳道游"。陆地照旧沿用当前俯仰
+     * (挖掘/看路的姿势不被打断)。
+     */
+    public static void moveTowardsLevel(Player player, MovementState state, BlockPos pos) {
+        float yaw = yawTo(player.getEyePosition(), blockCenter(pos));
+        state.setTarget(new MovementState.MovementTarget(yaw, 0.0f, false));
+        state.setInput(Input.MOVE_FORWARD, true);
+    }
 }

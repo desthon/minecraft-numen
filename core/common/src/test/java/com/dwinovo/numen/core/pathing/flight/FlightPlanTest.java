@@ -29,10 +29,32 @@ class FlightPlanTest {
     // ==================== 能力与推力 ====================
 
     @Test
-    void flightNeedsBothPermissionAndAFreeBody() {
-        assertTrue(FlightPlan.canFly(true, false));
-        assertFalse(FlightPlan.canFly(false, false), "没被允许飞就是不能飞");
-        assertFalse(FlightPlan.canFly(true, true), "坐在船上/马上:她的输入推不动载具");
+    void flightNeedsTheModeTheAbilityAndAFreeBody() {
+        // 全矩阵:档位 × mayfly × 载具,只有"三者都对"才允许飞
+        for (boolean mode : new boolean[] {true, false}) {
+            for (boolean mayfly : new boolean[] {true, false}) {
+                for (boolean passenger : new boolean[] {true, false}) {
+                    boolean expected = mode && mayfly && !passenger;
+                    assertEquals(expected, FlightPlan.canFly(mode, mayfly, passenger),
+                            "档位=" + mode + " mayfly=" + mayfly + " 载具=" + passenger);
+                }
+            }
+        }
+        assertTrue(FlightPlan.canFly(true, true, false), "创造 + mayfly + 没骑东西 = 能飞");
+    }
+
+    @Test
+    void dirtyAbilityBitsNeverOpenTheGate() {
+        // 实机 bug「生存档仍然调用飞行代码」的根子:早先这条判据只看 mayfly,而它是
+        // 从 .dat 读回来的<b>上一次的事实</b>(Player.addAdditionalSaveData 存它)——
+        // 档位切回生存之后能力位可能还留着 true,于是判据说"能飞",整条飞行路径照跑。
+        assertFalse(FlightPlan.canFly(false, true, false),
+                "档位是生存、mayfly 还留着 true(脏位):一律不许飞");
+        // 反过来的脏状态同样拦住:档位像创造但能力位没补上,要先补(且只在档位允许时补)
+        // 再判 —— 判据不替谁做假设
+        assertFalse(FlightPlan.canFly(true, false, false), "档位允许但 mayfly=false:补完再判");
+        assertFalse(FlightPlan.canFly(false, false, false), "生存 + 能力位也不在");
+        assertFalse(FlightPlan.canFly(false, true, true), "生存 + 还骑着东西");
     }
 
     @Test
@@ -58,6 +80,34 @@ class FlightPlanTest {
         assertTrue(FlightPlan.stalled(0.0, 0.0, 0.0));
         assertFalse(FlightPlan.stalled(0.5, 0.0, 0.0), "飞行一 tick 半格,这绝不是没动");
         assertFalse(FlightPlan.stalled(0.0, 0.1, 0.0), "纯上升也是动");
+    }
+
+    // ==================== 下落与落地 ====================
+
+    @Test
+    void theDescentKeepsPushingAllTheWayDownToTheLandingCell() {
+        // 死区是"巡航保持"的判据;下落段照搬它,她就会停在地面上方 0.75 格以内不再往下推,
+        // 而飞行分支不施重力——速度衰减到零之后她就悬在那儿,onGround() 永远不成立。
+        // 三个 fly_to 在实机里就是这么收场的:"我推了 30 刻没动一格",而点名的那格是空气。
+        assertEquals(-1, FlightPlan.descentThrust(66.0, 64));
+        assertEquals(-1, FlightPlan.descentThrust(64.5, 64), "半格高也必须继续推");
+        assertEquals(0, FlightPlan.descentThrust(64.2, 64), "进到容差带里就不用推了");
+        assertEquals(0, FlightPlan.descentThrust(64.0, 64));
+    }
+
+    @Test
+    void landingIsJudgedByReachingTheCellNotByApproachingIt() {
+        assertTrue(FlightPlan.reachedLandingHeight(64.0, 64), "脚在落脚点那一格上就是到了");
+        assertTrue(FlightPlan.reachedLandingHeight(64.2, 64), "四分之一格之内是踩上去了");
+        assertFalse(FlightPlan.reachedLandingHeight(64.5, 64), "半格高还悬着,不算落地");
+        assertTrue(FlightPlan.reachedLandingHeight(63.9, 64), "略低一点也算进了那一格");
+    }
+
+    @Test
+    void cruiseHoldAndDescentAreTwoDifferentCriteria() {
+        // 一条怕抖(巡航),一条怕落不下去(下落):同一个高度差,两个判据给相反的答案
+        assertEquals(0, FlightPlan.verticalThrust(64.5, 64.0));
+        assertEquals(-1, FlightPlan.descentThrust(64.5, 64));
     }
 
     // ==================== 走廊净空 ====================

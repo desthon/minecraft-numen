@@ -17,6 +17,7 @@ import com.dwinovo.numen.core.pathing.moves.ActionCosts;
 import com.dwinovo.numen.core.pathing.moves.CalculationContext;
 import com.dwinovo.numen.core.pathing.moves.ChunkLoadedTest;
 import com.dwinovo.numen.core.pathing.moves.FlowCost;
+import com.dwinovo.numen.core.pathing.moves.Movement;
 import com.dwinovo.numen.core.pathing.moves.MovementHelper;
 import com.dwinovo.numen.core.pathing.moves.Moves;
 import com.dwinovo.numen.core.pathing.moves.MutableMoveResult;
@@ -258,18 +259,24 @@ class WaterCrossingCostTest {
     /**
      * 泳道在哪:浮着的水才算泳位 —— 深水(3 格)的泳道是<b>水面那一格</b>与其下一格,
      * 湖底那一格不算(沉底的人头在水下,是憋气不是游泳)。
+     *
+     * <p><b>入参是支撑格,不是身位格</b>(与实心方块同一把尺):{@code canWalkOn(x,y,z)}
+     * 问的是"能不能站在 (x,y,z) 上",节点就在 {@code y+1}。上一轮水那一支把入参当成了
+     * 身位格,整条泳道被抬高了一格:水面那一格<b>之上</b>的空气格也进了泳道
+     * (实机:泳道节点 63、水面水格 62),而那一格脚下不是水、浮力挂不住 ——
+     * 规划出来的泳位永远站不住,身体每 21 刻判一次"脱轨"取消重算。
      */
     @Test
     void swimLaneIsTheFloatingWater() {
         FakeView v = channel(3, false);
         assertTrue(MovementHelper.canWalkThrough(v, at(1, TOP_WATER)), "顶层水格应可穿行");
         assertTrue(MovementHelper.canWalkThrough(v, at(1, SHORE_FEET)), "水面上方应是空气");
-        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER)),
-                "水面那一格就是泳位(浮着,靠浮力挂住)");
         assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 1)),
-                "再下一格也浮着(脚下一格还是水),同样可站");
-        assertFalse(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 2)),
-                "再往下脚下一格就是湖底石了:不浮 → 不是泳道(沉底憋气那段)");
+                "支撑格是水面下一格的水 → 节点「水面那一格」就是泳位(脚泡在水里,浮着)");
+        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 2)),
+                "再往下一格(脚下一格还是水)同样浮着,可站");
+        assertFalse(MovementHelper.canWalkOn(v, at(1, TOP_WATER)),
+                "水面之上的那一格(空气)不是泳位 —— 脚不在水里,浮力挂不住它");
     }
 
     /**
@@ -280,9 +287,9 @@ class WaterCrossingCostTest {
     @Test
     void lakeBedIsNotASwimLane() {
         FakeView v = channel(3, false);
-        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 3)), "湖底 stone 本身可站");
-        assertFalse(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 2)),
-                "贴着湖底那一层水:脚下一格就是湖底石 → 不浮,不算泳道");
+        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 3)), "湖底 stone 本身可站(节点在它上面那一格)");
+        assertFalse(MovementHelper.isFloatingAt(v, ChunkLoadedTest.ALWAYS, 1, TOP_WATER - 2, 0),
+                "贴着湖底那一层水不浮:脚下一格就是湖底石 → 涉水档,不是泳道");
         assertTrue(MovementHelper.canWalkOn(v, at(0, TOP_WATER)), "岸上可站(对照:岸面在 x≤0 / x≥4)");
     }
 
@@ -580,15 +587,27 @@ class WaterCrossingCostTest {
 
     /**
      * 水里按住跳会把身体<b>往上</b>顶:这条是"不沉"的执行侧来源,也是"逆着水柱游得
-     * 上去"的前提。判据是浮着(脚与脚下都是水),浅水涉水不算 —— 否则浅水里会一路蹦。
+     * 上去"的前提。闸门是 {@link Movement#strokeUp}(纯判据的钉子见
+     * {@code MovementBuoyancyTest}):<b>身体泡在液体里</b>且还没浮到泳道以上就按,
+     * 浅水涉水不按 —— 否则浅水里会一路蹦。
+     *
+     * <p>这里复现的就是实机那个状态:身体浮在水面、<b>脚那一格已经落在水面上方那一格
+     * (空气)</b>里。上一轮的闸门问"脚那格是不是水",在这里恒为假 —— 泳道那一格永远
+     * 浮不住;现在的闸门问实体自己的液体状态,照样往上划。
      */
     @Test
     void floatingBodyGetsTheBuoyancyStroke() {
+        assertTrue(Movement.strokeUp(true, false, false, 62.6, 63),
+                "脚那格是空气、身体还在水里、泳道在上一格 → 必须划水");
+        assertTrue(Movement.strokeUp(true, false, true, 60.0, 62), "水柱里浮着(离地)→ 每 tick 按跳");
+        assertFalse(Movement.strokeUp(true, true, false, 62.0, 62),
+                "浅水涉水:踩得到底、水没到身体 → 不按跳(按了会变成一路蹦)");
+        // 与"水价档位"同一个位置概念:浮着那一档仍由 isFloatingAt 选(见 waterTierCost)。
         CalculationContext deep = context(waterColumn(0, 2, 64, 60));
-        assertTrue(MovementHelper.isFloatingAt(deep, 1, 62, 0), "深水泳道:浮着 → 每 tick 按跳");
+        assertTrue(MovementHelper.isFloatingAt(deep, 1, 62, 0), "深水泳道那一格是浮着的(浮着档价)");
         CalculationContext shallow = context(channel(1, false));
         assertFalse(MovementHelper.isFloatingAt(shallow, 1, TOP_WATER, 0),
-                "浅水涉水:不按跳(踩得到底,按了会变成一路蹦)");
+                "浅水涉水:脚下一格是湖底 → 涉水档");
     }
 
     // ==================== 现象 2:瀑布(下落水柱)=====================
@@ -627,8 +646,11 @@ class WaterCrossingCostTest {
         FakeView v = waterfallIntoPool();
         CalculationContext ctx = context(v);
         assertTrue(MovementHelper.canWalkThrough(v, at(2, 63)), "水柱中段身体占得住");
-        assertTrue(MovementHelper.canWalkOn(v, at(2, 63)), "水柱里可站(浮力挂着)");
-        assertTrue(MovementHelper.canWalkOn(v, at(2, 64)), "再上一格同样可站");
+        // canWalkOn 的入参是支撑格 → 节点 = 入参上面那一格:61/62/63 对应水柱的 62/63/64
+        assertTrue(MovementHelper.canWalkOn(v, at(2, 61)), "水柱底部(水池那一格)可站:浮力挂着");
+        assertTrue(MovementHelper.canWalkOn(v, at(2, 62)), "水柱里可站(浮力挂着)");
+        assertTrue(MovementHelper.canWalkOn(v, at(2, 63)), "再上一格同样可站");
+        assertFalse(MovementHelper.canWalkOn(v, at(2, 64)), "水柱之上那一格(空气)不是泳位");
         assertTrue(MovementHelper.canWalkThrough(v, at(2, 62)), "水柱底部(水池那一格)身体占得住");
         assertTrue(MovementHelper.fallingWaterTerminatesSafely(v, ChunkLoadedTest.ALWAYS, 2, 63, 0),
                 "底下是水池 → 安全");

@@ -187,7 +187,9 @@ public class MovementDescend extends Movement {
                 res.cost = tentativeCost;
                 for (int up = 0; up <= SWIM_LANE_LOOKUP; up++) {
                     int laneY = newY + up;
-                    if (MovementHelper.canWalkOn(context, destX, laneY, destZ)) {
+                    // canWalkOn 判的是**支撑格**:节点 laneY 合不合法要看 laneY-1
+                    // (与搜索里其余几处同一把尺;水那一支也是这么翻的,见 canWalkOnPosition)。
+                    if (MovementHelper.canWalkOn(context, destX, laneY - 1, destZ)) {
                         res.y = laneY;
                         return false; // 泳位(水面那一格 / 水柱里浮着的那几格)
                     }
