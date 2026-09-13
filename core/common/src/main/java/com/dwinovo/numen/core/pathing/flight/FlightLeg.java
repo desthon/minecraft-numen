@@ -22,6 +22,12 @@ import com.dwinovo.numen.entity.NumenPlayer;
  * <h2>任何收场都不留悬停的身体</h2>
  * {@link #stop()} 与 {@link #tick()} 走到终态都会停飞;调用方只需要在任务收尾时无条件
  * 调一次 {@link #stop()}(幂等)。
+ *
+ * <h2>这条腿永远落地,不悬停</h2>
+ * 到点之后的意图是 {@link FlightPlan.Arrival#LAND} 写死的:<b>悬停只属于主人点名的
+ * {@code fly_to}</b>(那是"停在那儿等下一句吩咐"),而这条腿是导航自己插的——飞完了
+ * goto 还要接着走完剩下那几步,停在半空等它走就自相矛盾了。所以这里读到
+ * {@link FlightDrive.Status#HOLDING} 只可能是接线错了,当失败处理而不是接着飘。
  */
 public final class FlightLeg {
 
@@ -38,8 +44,9 @@ public final class FlightLeg {
     private FlightLeg(NumenPlayer player, double x, double z) {
         this.tx = (int) Math.floor(x);
         this.tz = (int) Math.floor(z);
-        // 巡航高度交给地形自己抬(见 FlightPlan):自动飞行要的是"过去",不是"飞多高"
-        this.drive = new FlightDrive(player, x, null, z);
+        // 巡航高度交给地形自己抬(见 FlightPlan):自动飞行要的是"过去",不是"飞多高"。
+        // 意图是 LAND:这条腿到点必须落回地面,理由见类注释。
+        this.drive = new FlightDrive(player, x, null, z, FlightPlan.Arrival.LAND);
     }
 
     /**
@@ -79,6 +86,18 @@ public final class FlightLeg {
                 failType = drive.failType();
                 terminal = Status.FAILED;
                 drive.stop();     // 失败也要停飞:不留一个挂在半空的她
+                return terminal;
+            }
+            // 不会有 HOLDING:这条腿的意图是 LAND(见类注释)。真收到了就是有人把意图
+            // 接线接错了,而"导航腿停在半空等下一步"是比失败更坏的结果 —— 当失败收场,
+            // 顺带把那具还在飞的身体停掉。
+            case HOLDING -> {
+                failReason = "this flight leg ended up holding in mid-air, which a navigation"
+                        + " leg must never do. I stopped flying where I was; goto can pick the"
+                        + " rest up on foot.";
+                failType = FailureType.INTERNAL;
+                terminal = Status.FAILED;
+                drive.stop();
                 return terminal;
             }
             default -> throw new IllegalStateException("unknown flight status");

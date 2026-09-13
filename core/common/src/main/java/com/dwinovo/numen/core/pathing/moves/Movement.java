@@ -199,8 +199,8 @@ public abstract class Movement {
 
     /**
      * 每 tick 推进一次。通用框架:强制关闭飞行能力(走地面物理)→
-     * 子类状态机 → 泡在液体里且还没浮到终点那一层时强按跳(上浮,见
-     * {@link #strokeUp})→ 卡墙时先换上对该方块最优工具再按左键 →
+     * 子类状态机 → 水里按 {@link #waterDrive} 处置(按跳上浮 / 收疾跑下潜 /
+     * 轻俯角压住泳道)→ 卡墙时先换上对该方块最优工具再按左键 →
      * 视角与按键交执行层钩子,按键先清后设、终态清空。
      */
     public MovementStatus update() {
@@ -209,22 +209,26 @@ public abstract class Movement {
         player.getAbilities().flying = false;
         currentState = updateState(currentState);
         BlockPos feet = feet(player);
-        // 浮力:<b>身体泡在液体里</b>就按跳 —— 原版 LivingEntity.aiStep 里按跳在液体中
-        // 走的是 jumpInFluid(每 tick +0.04 的划水),正是浮力:身体因此稳在泳道那一层,
-        // 不会一路沉到湖底"如履平地";而下落水柱的推力竖直向下,也正是这一点上浮冲量
-        // 让人能逆着水柱游上去(这是把水柱从"墙"改成"价"的前提)。
-        //
-        // 判据<b>不能</b>是"脚那一格是不是水":浮在水面时脚正好落在水面上方那一格
-        // (空气)里 —— 恰恰是最该上浮的状态,那条判据为假,泳道因此永远浮不住
-        // (实机:泳道节点 63、水面水格 62,身体只能停在 62,每 21 刻判一次脱轨)。
-        // 也不能一看"浮着"就无条件按:泳道在下方时那样会一直跟重力对拉,下潜不下去。
-        // 现在用的是实体自己的液体状态(与 InputDriver.jump 里那一问同一把尺)+
-        // "还没浮到泳道以上"。
+        // 水里的竖直/疾跑/俯仰处置,见 waterDrive:三条结论一次给全。
         boolean inLiquid = player.isInWater() || player.isInLava();
         // 水有没有没到身体:脚上面那格还是液体。浅水里它是假 —— 那条路叫涉水。
         boolean liquidAboveFeet = MovementHelper.isLiquid(player.level().getBlockState(feet.above()));
-        if (strokeUp(inLiquid, player.onGround(), liquidAboveFeet, player.getY(), dest.getY())) {
+        WaterDrive drive = waterDrive(inLiquid, player.isSwimming(), player.onGround(),
+                liquidAboveFeet, player.getY(), dest.getY());
+        if (drive.strokeUp()) {
             currentState.setInput(Input.JUMP, true);
+        }
+        if (!drive.sprint()) {
+            // 收疾跑:身体还没没入水面时先沉下去(实机"在水面上走"的正因,见 waterDrive)
+            currentState.setInput(Input.SPRINT, false);
+        }
+        if (drive.dive()) {
+            MovementState.MovementTarget aim = currentState.getTarget();
+            if (aim.hasRotation()) {
+                // 只压俯仰,不动 yaw:前进方向照旧指着路径,低头只是给竖直速度定个下潜目标
+                currentState.setTarget(new MovementState.MovementTarget(
+                        aim.getYaw(), SWIM_DIVE_PITCH, aim.hasToForceRotations()));
+            }
         }
         if (player.isInWall()) {
             // 卡墙自救:先换上对当前准星命中方块最优的工具再按左键,
@@ -250,35 +254,101 @@ public abstract class Movement {
     }
 
     /**
-     * 浮力闸门(纯判据,可单测):这一 tick 要不要按跳划水。
+     * 入泳姿的门坎带(格):身体在泳道格底面之上这么高以内,就把疾跑挂回去 ——
+     * 眼睛这时已经没入水面,原版下一 tick 的 {@code updateSwimming} 正好放行泳姿。
+     * 高于这条线又还没进泳姿时,疾跑必须收着(水里疾跑 = 没有重力,人永远沉不下去)。
      *
-     * <p>液体里按住跳 = 原版 {@code jumpInFluid} 每 tick +0.04 的上浮冲量
-     * (见 {@code InputDriver.jump});这是身体停在泳道那一层、以及逆着下落水柱游上去的
-     * 唯一来源。判据的两头别搞反:
+     * <p>上界是原版几何卡出来的(<b>1.20.1 反汇编核对</b>,official 映射 jar):
      * <ul>
-     *   <li>"在液体里"问的是<b>实体自己的液体状态</b>,不是"脚那一格是水" —— 浮在水面时
-     *       脚正好在水面上方那一格(空气)里,按格问必然为假,身体就浮不住;</li>
-     *   <li>"没到泳道以上才划" —— 已经浮到本动作终点那一层(或本来就要往下走)还继续划,
-     *       就会跟重力对拉,下潜与"水面下一格"的泳位都到不了。</li>
+     *   <li>入泳姿那一刻问的是<b>站姿</b>眼高:{@code Player.getStandingEyeHeight}
+     *       非泳姿 1.62、泳姿 0.4;</li>
+     *   <li>眼睛算不算进水由 {@code Entity.updateFluidOnEyes} 判:
+     *       {@code eyeY - 0.111 < 格底 + 该格水面高};</li>
+     *   <li>顶层水格的水面高 8/9 = 0.888({@code FlowingFluid.getHeight}:
+     *       上面还有水才是 1.0)。所以泳道格正上方就是水面(最紧的一档)时,
+     *       脚必须低于 {@code 泳道底 + 0.888 + 0.111 - 1.62} = {@code 泳道底 + 0.379}。</li>
+     * </ul>
+     * 带子取 0.25,留 0.13 给浮点误差与一个 tick 的迟滞(疾跑是本 tick 末尾才落到实体上的,
+     * 下一 tick 的 {@code updateSwimming} 才看得见)。
+     */
+    public static final double SWIM_ENTRY_BAND = 0.25;
+
+    /** 划水上浮的触发余量:低于泳道格底面这么多才划,免得站在水下地面上一直蹦。 */
+    static final double STROKE_SLACK = 0.05;
+
+    /**
+     * 下潜的触发高度(格):<b>已经在泳姿里</b>又浮到泳道底面之上这么多,才低头。
+     *
+     * <p>为什么不是一超出停留带就低头:低头到"回到带里"就松手的话,余速还会把人往下压
+     * 约 {@code v / (1 - 0.8 * 0.94) * 0.752 ≈ 0.4} 格(水阻 0.8 与泳姿竖直耦合 0.94 各衰减一次)。
+     * 松手点留出这段余量,人正好落回停留带下沿,不会一低头就扎穿泳道格
+     * (脚位掉到下一格 = 执行器判"身位脱离路径")。
+     */
+    static final double DIVE_TRIGGER = 0.55;
+
+    /**
+     * 下潜俯角(度,<b>正角是俯视</b>,与 {@link AimGeometry#pitchTo} 同号)。
+     *
+     * <p>不是"想潜多深"而是"改多快":原版 {@code Player.travel} 的泳姿分支把
+     * 竖直速度往视线俯仰分量上拉({@code vy += (lookY - vy) * e},e=0.06 或 0.085),
+     * 8° 约 {@code lookY = -0.139} → 竖直速度收到 -0.139 格/tick(≈2.8 格/s,
+     * 从换气的浮头位置回到泳道只要十来刻);松手(平视)后速度按水阻与这条耦合衰减,
+     * 多走约 0.4 格 —— 正好落在 {@link #DIVE_TRIGGER} 让出的那段余量里。
+     */
+    public static final float SWIM_DIVE_PITCH = 8.0f;
+
+    /**
+     * 水里这一 tick 的处置(纯判据,可单测):要不要按跳上浮、要不要低头下潜、
+     * 要不要保留疾跑。
+     *
+     * <p><b>三条结论各自的由来</b>(都是原版事实,不是调参):
+     * <ul>
+     *   <li><b>按跳上浮</b>:液体里按住跳 = {@code LivingEntity.jumpInLiquid} 每 tick
+     *       +0.04 的上浮冲量;身体因此停在泳道那一层,下落水柱里也能逆着游上去。
+     *       判据两头别搞反:"在液体里"问的是<b>实体自己的液体状态</b>(浮在水面时脚
+     *       正好落在水面上方那一格空气里,按格问必然为假);"低于泳道底面才划" ——
+     *       已经到泳道层还继续划就是跟重力对拉,而且站在水下地面上会一路蹦
+     *       (浅水涉水因此单独排除)。</li>
+     *   <li><b>收疾跑</b>:这是"下潜不下去"的正因。原版
+     *       {@code LivingEntity.getFluidFallingAdjustedMovement} 一看到
+     *       {@code isSprinting()} 就直接把运动矢量原样返回 —— <b>水里疾跑等于关掉重力</b>;
+     *       再叠上执行侧的划水,身体就钉在液面那一层上下不去。而泳姿的<b>准入</b>又要求
+     *       疾跑({@code updateSwimming}:{@code isSprinting() && isUnderWater()}),
+     *       所以顺序只能是:先松开疾跑让重力把人压到水面之下,眼睛一进水再把疾跑挂回去
+     *       —— 那正是 {@link #SWIM_ENTRY_BAND} 的位置。深水里踩得到底、浅水涉水都在带内,
+     *       照旧疾跑。</li>
+     *   <li><b>低头下潜</b>:只在<b>已经在泳姿里</b>且高于停留带时用 —— 泳姿分支的竖直
+     *       耦合只对 {@code isSwimming()} 生效,没进泳姿时低头什么也改不了(所以不能拿它
+     *       当入水手段)。</li>
      * </ul>
      *
      * @param inLiquid        身体泡在液体里(实体自己的液体状态)
+     * @param swimming        实体当前是否在泳姿({@link net.minecraft.world.entity.player.Player#isSwimming()})
      * @param onGround        脚踩得到底
      * @param liquidAboveFeet 水没到身体:脚上面那一格还是液体
      * @param playerY         身体高度(脚下沿)
-     * @param destY           本动作终点格的 y:它那一层才是要浮住的泳道
+     * @param destY           本动作终点格的 y:它那一层才是要停住的泳道
      */
-    public static boolean strokeUp(boolean inLiquid, boolean onGround, boolean liquidAboveFeet,
-                                   double playerY, int destY) {
+    public static WaterDrive waterDrive(boolean inLiquid, boolean swimming, boolean onGround,
+                                        boolean liquidAboveFeet, double playerY, int destY) {
         if (!inLiquid) {
-            return false;
+            return WaterDrive.DRY; // 陆地:一律不干预,子类自己的按键与疾跑请求照旧
         }
-        if (onGround && !liquidAboveFeet) {
-            return false; // 浅水涉水:踩得到底、水没到身体 —— 按跳只会一路蹦
-        }
-        // 深水里踩得到底(湖底)照按:那是要从水底浮上去。但如果已经浮到泳道以上
-        // (或本来就要往下走),再按就是跟重力对拉 —— 下潜和下到水面下一格都到不了。
-        return playerY < destY + 0.6;
+        boolean wading = onGround && !liquidAboveFeet; // 踩得到底、水没到身体:涉水
+        boolean strokeUp = !wading && playerY < destY - STROKE_SLACK;
+        boolean aboveEntryBand = playerY > destY + SWIM_ENTRY_BAND;
+        // 已经在泳姿里:浮得太高就低头把身体压回来(否则水里疾跑没有重力、水阻也只会慢慢
+        // 把余速磨掉,一直挂在泳道格上沿甚至漂出去);没进泳姿:低头没用,
+        // 只能靠收疾跑把重力请回来
+        boolean dive = swimming && playerY > destY + DIVE_TRIGGER;
+        boolean sprint = swimming || !aboveEntryBand;
+        return new WaterDrive(strokeUp, dive, sprint);
+    }
+
+    /** {@link #waterDrive} 的三条结论:按跳上浮 / 低头下潜 / 保留疾跑。 */
+    public record WaterDrive(boolean strokeUp, boolean dive, boolean sprint) {
+        /** 陆地或浅水涉水之外的一切"别管我"组合:不上浮、不下潜、疾跑照子类的请求。 */
+        static final WaterDrive DRY = new WaterDrive(false, false, true);
     }
 
     /** 玩家准星当前命中的方块状态;未命中返回 null。 */

@@ -11,7 +11,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * {@code fly_to}:直线飞到某一列,落在那一列的地面上。
+ * {@code fly_to}:直线飞到某一列,到场之后<b>悬停在目标点上方(默认)或落到地面上</b>。
  *
  * <h2>能力门开在最前面,而且说人话</h2>
  * 不能飞(生存档,mayfly=false)时<b>起飞都不试</b>:试的表现是她原地推空气几秒然后
@@ -22,9 +22,28 @@ import java.util.Map;
  * 原版 {@code setGameMode} 在档位没变时会提前返回、压根不碰 abilities,而能力位本身
  * 是从 .dat 里读回来的上一次的事实——"她是创造档"与她"此刻能飞"之间没有谁能保证。
  *
+ * <h2>两种到点:悬停(默认)与落地</h2>
+ * <b>悬停</b>({@code land} 省略或 false):她停在目标列上空保持不动。这条活的期限是
+ * {@link com.dwinovo.numen.task.TaskRecord#NO_DEADLINE}(常驻)——它<b>不会自己结束,
+ * 也不发 task_finished</b>;主人继续吩咐别的动作就是让它停下的正常方式(见
+ * {@code TaskDispatch.setTask} 对常驻活的回执)。四个出口,每一个都当刻把
+ * {@code flying} 清掉:
+ * <ol>
+ *   <li>派下一个身体动作(goto / 挖 / 交互…):本任务算<b>被换掉</b>,收尾走
+ *       {@link #cleanup} → 停飞,她在新任务接管之前就不再飞了;</li>
+ *   <li>{@code task_stop} 或主人按停止:算取消,同样走 {@link #cleanup};</li>
+ *   <li>被本能抢占(饿了、被打了、快淹死):{@link #stop} 当刻停飞,身体交给本能;
+ *       本能松开后本任务拿回身体,驱动会发现"她不在飞了"并按新位置重规划,飞回去接着悬;</li>
+ *   <li>飞行许可被收回(切回生存 / 能力位没了):驱动每刻现读许可(见
+ *       {@link FlightPermit}),当刻停飞并如实报告。</li>
+ * </ol>
+ * <p><b>落地</b>({@code land=true}):老规矩一字不变——落到目标列的地面上,
+ * {@link #cleanup} 停飞,收尾发 task_finished。期限与飞行预算照旧。
+ *
  * <h2>飞行本身不是这条任务写的</h2>
- * 三段航线、净空判据、卡住判定全在 {@link FlightPlan}(纯)与 {@link FlightDrive}(驱动)。
- * 这里只管生命周期:起手校对能力、算预算、转发 tick、把终局写成回执、收尾停飞。
+ * 三段航线、净空判据、卡住判定、悬停纠位全在 {@link FlightPlan}(纯)与
+ * {@link FlightDrive}(驱动)。这里只管生命周期:起手校对能力、算预算、转发 tick、
+ * 把终局写成回执、收尾停飞。
  */
 public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
 
@@ -72,11 +91,21 @@ public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
         // <p>飞行的"飞不动"由 FlightDrive 自己的卡住判定如实收场,那条判据比这条本能
         // 细(它知道当前是哪一段、一共走了几格、前面那一格是不是空气)。按住是临时的:
         // 她闲下来时 CompanionBrain 会统一解除(见 NumenPlayer.pauseReflex)。
+        //
+        // <p><b>悬停让这一按从"顺手"变成"必需"</b>:悬停就是"一动不动的几十秒到几分钟",
+        // 而那正是 UnstuckChain 的判据(40 刻没动)最标准的样本。这一位要是中途松开,
+        // 本能每 40 刻就会来抢一次身体,而抢占要当刻停飞(见 {@link #stop})——主人看到的
+        // 就是她悬着悬着自己一次次往下掉。按住的生命周期正好对得上:hover 期间当前任务槽
+        // 一直非空,CompanionBrain 就不会解除(它只在两个槽都空时才 resumeAllReflexes)。
         player.pauseReflex("unstuck");
+        // 期限:落地意图按距离算一个真实预算;悬停意图的记录本来就是 NO_DEADLINE
+        // (常驻,见类注释与 FlyTool),extendDeadlineTo 只会往后推、推不动它——这里
+        // 照写不误,好让"两种意图共用同一段起飞逻辑"。
         long now = player.level().getGameTime();
         double dist = Math.sqrt(player.distanceToSqr(r.x, player.getY(), r.z));
         r.extendDeadlineTo(now + Math.min(MAX_EXTRA_TICKS, 600 + (long) (dist * TICKS_PER_BLOCK)));
-        drive = new FlightDrive(player, r.x, r.cruiseY, r.z);
+        drive = new FlightDrive(player, r.x, r.cruiseY, r.z,
+                r.land ? FlightPlan.Arrival.LAND : FlightPlan.Arrival.HOVER);
     }
 
     @Override
@@ -86,6 +115,12 @@ public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
         }
         return switch (drive.tick()) {
             case RUNNING -> TaskState.RUNNING;
+            // 悬停是"到达之后的常驻态":任务<b>不结束</b>,继续每刻接管这具身体(纠位、
+            // 复核许可)。把高度写进记录,主人的 current_task 那行才说得清她在干什么。
+            case HOLDING -> {
+                r.markHovering(drive.holdY());
+                yield TaskState.RUNNING;
+            }
             case ARRIVED -> TaskState.SUCCESS;
             case FAILED -> {
                 fail(drive.failReason(), drive.failType());
@@ -94,10 +129,19 @@ public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
         };
     }
 
+    /**
+     * 收尾停飞。
+     *
+     * <p><b>悬停是"活着的任务"才有的状态</b>:任务还在跑,她就该停在那层不动(见
+     * {@link FlightDrive.Status#HOLDING});任务一收场——被换掉、被叫停、失败、身体离场——
+     * 就必须把 {@code flying} 清掉。留着它的身体没有重力(飞行分支不施重力),会一直挂
+     * 在半空等谁来管;而那一位还随 .dat 落盘,重启回来还是一具飘着的身体。
+     * 这就是"悬停"与"停飞"的分界:前者有主,后者不许有。
+     */
     @Override
     protected void cleanup() {
         if (drive != null) {
-            drive.stop();   // 停飞:任何收场都不许留一个"还在飞"的身体
+            drive.stop();
         }
         super.cleanup();
     }
@@ -108,6 +152,10 @@ public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
      * <p>基类只清移动输入就够了(走路的身体自己会站稳);飞行不行——{@code flying}
      * 还留着的话,本能那几秒里她就一直挂在半空,而本能结束后本任务会按当前位置重规划
      * (计划留着,不白算),所以这里停飞没有代价。
+     *
+     * <p>悬停时同理,而且更要紧:被抢占那一瞬她就该交给重力(这是主人要的"被抢走身体时
+     * 别硬撑着飘"),本能结束后本任务拿回身体,驱动发现"她不在飞了"会按<b>现在的</b>位置
+     * 重规划——她已经落地了,于是重新飞回目标列上空接着悬。
      */
     @Override
     public void stop(NumenPlayer companion, StopReason why) {
@@ -139,9 +187,18 @@ public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
 
     @Override
     protected String cancelledMessage() {
-        return "interrupted in mid-air; I stopped flying where I was (x="
-                + (int) Math.floor(player.getX()) + " y=" + (int) Math.floor(player.getY())
-                + " z=" + (int) Math.floor(player.getZ()) + ").";
+        String where = "(x=" + (int) Math.floor(player.getX())
+                + " y=" + (int) Math.floor(player.getY())
+                + " z=" + (int) Math.floor(player.getZ()) + ")";
+        // 悬停被收走时说清楚"我本来在干什么":她收到的可能是"派下一个活顶替了它",
+        // 那句话在模型那边得能对上号——不然一具莫名其妙开始下落的身体很难解释。
+        if (r.hovering()) {
+            return "I was holding in the air over x=" + (int) Math.floor(r.x)
+                    + " z=" + (int) Math.floor(r.z) + " at y=" + r.hoverY()
+                    + "; I stopped flying where I was and I am coming down " + where
+                    + ". Say where to go next and I will fly there.";
+        }
+        return "interrupted in mid-air; I stopped flying where I was " + where + ".";
     }
 
     @Override
@@ -152,6 +209,14 @@ public final class FlyToTask extends AbstractCompanionTask<FlyToTaskRecord> {
         data.put("final_z", player.getZ());
         data.put("on_ground", player.onGround());
         data.put("airborne_legs", drive != null && drive.started());
+        // 到点之后的意图也报出去:模型据此才知道"这一趟算落地了"还是"她还在悬着等下一句"
+        data.put("requested_landing", r.land);
+        if (drive != null && drive.holding()) {
+            data.put("hovering", true);
+            data.put("hover_y", drive.holdY());
+        } else {
+            data.put("hovering", false);
+        }
         FlightPlan.Plan plan = drive == null ? null : drive.plan();
         if (plan != null) {
             data.put("cruise_y", plan.cruiseY());

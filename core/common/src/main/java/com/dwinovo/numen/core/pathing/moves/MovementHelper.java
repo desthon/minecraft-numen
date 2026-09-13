@@ -200,9 +200,15 @@ public final class MovementHelper {
                         && fallingWaterTerminatesSafely(view, loaded, x, y, z);
             }
             if (!headClear) {
-                // 头还泡在水里:横向流水是"浮着的泳道",全身泡在水里也谈得上潜水;
-                // 满格源挨着流水等模糊情形维持旧判(不可穿)。
-                return NavSettings.get().allowFlowingWater && horizontalFlow;
+                // 头还泡在水里:横向流水照旧可穿(满格源挨着流水等模糊情形维持旧判);
+                // 另外 —— <b>水面之下那一格泳道本来就该是"身体待着的那一格"</b>
+                // (见 isSwimLane):只有让身体占得住那一层,路径才可能真的在水面之下游。
+                // 以前这里一律 false,身体只能占水面那一格 → 执行侧怎么划水都进不了泳姿,
+                // 实机就是"踩着水面走"。要真能容身:水方块本身(没有碰撞体),
+                // 不是"水封的半砖/木牌"那种。
+                return (NavSettings.get().allowFlowingWater && horizontalFlow)
+                        || isSwimLane(view, loaded, x, y, z)
+                                && state.getBlock() instanceof LiquidBlock;
             }
             return fluidState.getType() instanceof WaterFluid; // 只有水柱可游走
         }
@@ -331,21 +337,24 @@ public final class MovementHelper {
     }
 
     /**
-     * MAYBE 的位置精判(水/岩浆)。水的"泳位"语义:默认只能站在上方还有水的水格里
-     * (浮在水中);开水面行走则只能站在上方无水的水面上——两者按 XOR 互斥。
-     *
-     * <p><b>泳道 = 浮着的水</b>(现象 1 的模型侧):身位那一格是水、<b>脚下一格也是水</b>
-     * (见 {@link #isSwimLane}),不是"头顶有水的水柱内里"。湖底那一格因此不算浮着
-     * (脚下是实心石头,沉底的人头在水下),而水面那一格与它下面几格靠浮力挂得住。
+     * MAYBE 的位置精判(水/岩浆)。水的"泳位"语义:默认只能站在<b>泳位</b>上
+     * (见 {@link #isSwimLane}:身位那格是水、<b>头顶还有水</b> —— 身体没入水面之下),
+     * 另留一格"出水的踏脚点"给登岸用({@link #isExitPad});开水面行走语义则是站在
+     * 上方无水的水面上 —— 与泳位语义按 XOR 互斥。
      *
      * <p><b>入参是支撑格,不是身位格</b> —— 与实心方块同一把尺:判"节点 y 合不合法"用的是
      * {@code canWalkOn(x, y-1, z)}(见 {@code Movement.pathStart} 与各个成本函数),
-     * 所以水这一支要往上问一格,问的才是"站在这一格上的人浮不浮得起来"。上一轮把支撑格
-     * 直接喂给了 {@link #isSwimLane},整条泳道因此被抬高了一格:最上面那层成了水面之上的
-     * <b>空气格</b>(实机:泳道节点 63、水面水格 62)。那一格规划器照收,却还按"陆地"计价
-     * (身位两格都是空气,{@code MovementTraverse} 的水价分支根本不进),而执行侧的上浮
-     * 闸门在那一格恒为假(脚那格是空气不是水,见 {@code Movement#strokeUp}),身体只能停在
-     * 下一格 —— 泳位永远站不住,每 21 刻脱轨重算。两层泳道现在对齐。
+     * 所以水这一支要往上问一格,问的才是"站在这一格上的人待在哪一层"。
+     *
+     * <p><b>水面那一格为什么不自己当路</b>:停在那一格时身体露在水面上(站姿眼高 1.62,
+     * 眼睛在水面之上),原版 {@code updateSwimming} 的准入(疾跑 + 眼睛在水里)不成立 ——
+     * 于是只剩"踩着水面走"。实机 12:45 的 {@code [diag]} 正是"泳道节点 62(水面格)、
+     * 身位 63(水面之上)"。泳道因此下沉到水面之下那一格;水面那一格只在紧挨着岸、
+     * 下一步能登岸时才有条件留下当踏板。
+     *
+     * <p><b>湖底那一格</b>走的是"支撑格是实心"那条路(节点 = 贴着湖底那一层水),
+     * 由水价档位按"踩得到底"计价(见 {@link #waterTierCost})。它不再因为"头在水下"被排除:
+     * 2 格深的水里人只可能待在贴着底那一格,排掉它等于把整个池子变成墙。
      */
     public static boolean canWalkOnPosition(BlockGetter view, ChunkLoadedTest loaded,
                                             int x, int y, int z, BlockState state) {
@@ -370,9 +379,13 @@ public final class MovementHelper {
                 // 开水面行走语义:只能站在"上方无水"的水面上,与泳位语义按 XOR 互斥
                 return !isWater(upState);
             }
-            // 泳道判据(见方法注):浮着的水,或"头顶是水柱/瀑布"的那一格。
-            // 湖底那一格因此被排除(它脚下是实心石头):沉底的人头在水下,不该当路。
-            return isSwimLane(view, loaded, x, bodyY, z);
+            // 静水/横向流水停得住的两档(见方法注):
+            //   1) 泳位 —— 身位那格是水、<b>头顶还有水</b>:身体没入水面之下,
+            //      原版才进得了泳姿(见 isSwimLane);
+            //   2) 出水的踏脚点 —— 水面那一格(头顶没水),只在这格紧挨着岸、
+            //      下一步能登岸时才算(见 isExitPad)。它单独存在就是"踩着水面走"。
+            return isSwimLane(view, loaded, x, bodyY, z)
+                    || isExitPad(view, loaded, x, bodyY, z);
         }
 
         if (isLava(state) && !isFlowing(view, x, y, z, state) && NavSettings.get().assumeWalkOnLava) {
@@ -875,7 +888,7 @@ public final class MovementHelper {
      * —— 踩不到底,只能靠浮力。
      *
      * <p>入参是<b>身位格</b>(人要待的那一格),不是支撑格 —— 见
-     * {@link #canWalkOnPosition} 的入参说明。执行侧的上浮闸门({@link Movement#strokeUp})
+     * {@link #canWalkOnPosition} 的入参说明。水里那三条处置({@link Movement#waterDrive})
      * 刻意<b>不</b>用这一条:浮在水面时脚正好落在水面上方那一格(空气)里,按格问必然为假,
      * 那条判据会把最该上浮的状态判成"不在水里"。
      *
@@ -905,21 +918,107 @@ public final class MovementHelper {
     /**
      * (x,y,z) 这格<b>身位</b>能不能当泳位/落脚点(入参是身位格,不是支撑格)。
      *
-     * <p>两条路:
+     * <p>两条路,两条都要求 {@link #hasWaterAbove 头顶还有水}(身体没入水面之下):
      * <ul>
      *   <li><b>静水/横向流水</b>:要"浮着"——脚那格与脚下一格都是水。湖底那一格因此
-     *       被排除(脚踩着实心、头在水下是憋气,不该当路),而水中每一格
-     *       浮着的水都算(含水面那一格)—— 蓄满水的池子从上到下都是泳道,不存在
-     *       "可穿不可站"的死角。水面<b>之上</b>那一格(空气)不是泳位(脚不泡在水里)。</li>
+     *       被排除(脚踩着实心、头在水下是憋气,不该当路)。</li>
      *   <li><b>下落水柱</b>:浮力(每 tick 按跳)挂在柱子里,所以自上而下每一格都算,
      *       只要这条水柱底下有着落(不是岩浆、不是虚空)—— 就是
      *       {@link #fallingWaterTerminatesSafely}。</li>
      * </ul>
+     *
+     * <p><b>泳道不在水面那一格,而在水面之下那一格</b>(本轮修正):水面那一格
+     * 上面就是空气,身体露在水面上,原版<b>进不了泳姿</b>(见 {@link #hasWaterAbove}
+     * 的反汇编依据)。实机表现正是"踩着水面走":身体浮在水面格的上沿、眼睛在水面
+     * 之上,{@code updateSwimming} 的首个条件不成立,于是照陆地那一套走;
+     * 规划出来的节点又恰好是那一格,执行侧怎么按跳都只在液面上打转。
+     * 排掉水面那一格之后,模型落点自动落在"头刚好没入"的那一层。
+     * 浅水(1~2 格)照旧不受影响:那几格不是浮着的水(脚下踩得到底),
+     * 走的是"走进水里的那一格"。
      */
     private static boolean isSwimLane(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
-        return isFloating(view, loaded, x, y, z)
-                || isFallingWater(view.getBlockState(new BlockPos(x, y, z)).getFluidState())
-                        && isSignedOffBelow(view, loaded, x, y, z);
+        if (!hasWaterAbove(view, loaded, x, y, z) || !isFloatableLiquid(view, loaded, x, y, z)) {
+            return false;
+        }
+        BlockState state = view.getBlockState(new BlockPos(x, y, z));
+        if (isFallingWater(state.getFluidState())) {
+            // 水柱里的"泳位":浮力挂得住,但底下得有着落(见 isSignedOffBelow)
+            return isSignedOffBelow(view, loaded, x, y, z);
+        }
+        // 注意这里不再要求"脚下一格也是水"(那是水价档位 isFloatingAt 的事):
+        // 2 格深的水里,人只可能待在贴着底那一格 —— 要求"踩不到底"就把整个池子变成墙。
+        return true;
+    }
+
+    /** {@link #isSwimLane} 的上下文版(不查"水柱底下有没有着落"那一支,落地择层用)。 */
+    public static boolean isSwimLaneAt(CalculationContext context, int x, int y, int z) {
+        return isSwimLane(context.view, context.loadedTest, x, y, z);
+    }
+
+    /**
+     * (x,y,z) 这格<b>身位</b>是"浮在水面那一格":脚下是水、<b>头顶不是水</b> ——
+     * 身体露在水面上,原版进不了泳姿(见 {@link #hasWaterAbove})。
+     */
+    public static boolean isSurfaceFloat(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        return !hasWaterAbove(view, loaded, x, y, z)
+                && isFloating(view, loaded, x, y, z);
+    }
+
+    /**
+     * 水面那一格能不能当<b>出水的踏脚点</b>:它紧挨着岸,下一步(上升原语,横一格再上一格)
+     * 就能登上去。
+     *
+     * <p>为什么水面那一格不能自己当路:停在那一格时身体露在水面上,{@code updateSwimming}
+     * 的准入(疾跑 + 眼睛在水里)不成立 —— 那就是实机看到的"踩着水面走"。可从水里上岸必须
+     * 经过这样一格:泳道(没入水面之下那一格)横着走到岸边时,脚到岸面差着 1 格,
+     * 上升原语只能"横一格 + 上一格",于是它需要一格"水面上的落脚点"当踏板。
+     * 于是把水面那一格收窄成<b>只在这一个用途下</b>存在:邻格有能站的岸(节点在它上面一格),
+     * 且那一格本身通透(身体进得去)。湖中央的水面格四邻都是水或更深的岸,自然不算路。
+     *
+     * <p>不会递归:邻格若是水,{@link #canWalkOn} 问的是"能不能站在那格水上"(节点在它上面),
+     * 而水面上方是空气 → 立刻为假。
+     */
+    private static boolean isExitPad(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        if (!isSurfaceFloat(view, loaded, x, y, z)) {
+            return false;
+        }
+        for (net.minecraft.core.Direction d : net.minecraft.core.Direction.Plane.HORIZONTAL) {
+            int nx = x + d.getStepX();
+            int nz = z + d.getStepZ();
+            // 邻格岸面上的身位得通透(身体挤得进去),而且踩得住(节点 = 那格顶面)
+            BlockPos up = new BlockPos(nx, y + 1, nz);
+            if (canWalkThrough(view, loaded, nx, y + 1, nz, view.getBlockState(up))
+                    && canWalkOn(view, loaded, nx, y, nz)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * (x,y,z) 这格<b>身位</b>上面还有水:身体没入水面之下 —— 泳姿的物理门槛。
+     *
+     * <p>为什么门槛是"眼睛进水"而不是"脚泡在水里"(<b>1.20.1 反汇编核对</b>,
+     * Gradle 缓存里的 official 映射 jar):
+     * <ul>
+     *   <li>{@code Entity.updateSwimming}:不在泳姿时
+     *       {@code setSwimming(isSprinting() && (isUnderWater() || canStartSwimming()) && !isPassenger())}
+     *       —— <b>疾跑 + 眼睛在水里</b>两条缺一不可;而
+     *       {@code isUnderWater() = wasEyeInWater && isInWater()};</li>
+     *   <li>{@code Entity.updateFluidOnEyes}(每 tick 在 {@code baseTick} 里先于
+     *       {@code updateSwimming} 调用)判"眼睛进水"用的是
+     *       {@code eyeY - 0.111 < 格底 + 水面高};而
+     *       {@code FlowingFluid.getHeight} 只在"上面还有水"时返回 1.0,
+     *       顶层水格只有 8/9 = 0.888 —— 所以站在水面那一格里,眼睛(站姿眼高 1.62,
+     *       见 {@code Player.getStandingEyeHeight})永远在水面之上;</li>
+     *   <li>{@code LivingEntity.travel} 的水分支只在 {@code isSwimming()} 时走
+     *       {@code Player.travel} 的游泳竖直耦合(俯仰就是竖直速度),不进泳姿就没有
+     *       "下潜/上浮"这一套,只剩"在水里走"。</li>
+     * </ul>
+     */
+    private static boolean hasWaterAbove(BlockGetter view, ChunkLoadedTest loaded, int x, int y, int z) {
+        // 用"可浮液体"这一把尺:下落水柱与横向流水都算(受限开关同 isSwimLane 那两支)
+        return isFloatableLiquid(view, loaded, x, y + 1, z);
     }
 
     /** 这一格水柱下面有没有着落(水池/地面):只判"掉下去会不会没命",不管是不是泳位。 */

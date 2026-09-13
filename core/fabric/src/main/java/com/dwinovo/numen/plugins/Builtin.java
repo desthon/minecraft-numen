@@ -36,6 +36,19 @@ public final class Builtin {
         // Forgematica)mod id 各叫各的,包名是同一个。Fabric 这份装上就是 Litematica 本体。
         gate.openByClass("fi.dy.masa.litematica.data.DataManager", "litematica",
                 skills -> () -> LitematicaOnClient.install(skills));
+
+        // FTB Quests:任务书与进度都是磁盘上的 SNBT,联动不引用它任何一个类,所以判据
+        // 用一个三种加载器共有的类名(包名与 mod id 在 Forge/Fabric 上都是
+        // dev.ftb.mods.ftbquests)。它没用 mod id 判:类在不在是更硬的事实。
+        gate.openByClass("dev.ftb.mods.ftbquests.FTBQuests", "ftbquests",
+                skills -> () -> FtbQuestsOnServer.install(skills));
+    }
+
+    /** FTB Quests 联动只写原版(读的是文本文件),两个加载器上要装的东西一字不差。 */
+    private static final class FtbQuestsOnServer {
+        static void install(Path skills) {
+            com.dwinovo.numen.plugins.ftbquests.NumenFtbQuests.install(skills);
+        }
     }
 
     /** Litematica 联动只写原版,两个加载器上要装的东西一字不差,所以它没有宿主接口。 */

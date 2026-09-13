@@ -110,6 +110,38 @@ class FlightPlanTest {
         assertEquals(-1, FlightPlan.descentThrust(64.5, 64));
     }
 
+    // ==================== 到达之后:悬停,还是落地 ====================
+
+    @Test
+    void theHoldHeightIsNeverBelowTheLandingSpotPlusClearance() {
+        assertEquals(67, FlightPlan.holdY(64.0, 64),
+                "低空平飞(巡航高度就是落脚格):抬到落点之上三格,免得她飞到了却站在原地自称悬停");
+        assertEquals(77, FlightPlan.holdY(77.0, 68),
+                "本来就飞得高(越过山丘那一趟):一格都不抬,巡航高度就是悬停高度");
+        assertEquals(68 + FlightPlan.HOVER_CLEARANCE, FlightPlan.holdY(64.0, 68));
+    }
+
+    @Test
+    void hoveringNeedsBothTheColumnAndTheAltitude() {
+        assertTrue(FlightPlan.reachedHover(10.5, 70.0, 10.5, 10, 10, 70.0));
+        assertTrue(FlightPlan.reachedHover(10.5, 70.0 + FlightPlan.VERTICAL_DEADBAND - 0.01,
+                10.5, 10, 10, 70.0), "差得比死区小就算到位(靠死区停住,不抖)");
+        assertFalse(FlightPlan.reachedHover(10.5 + FlightPlan.VERTICAL_DEADBAND + 0.01, 70.0,
+                10.5, 10, 10, 70.0), "还差一截就是没到位");
+        assertFalse(FlightPlan.reachedHover(10.5 + FlightPlan.ARRIVE_RADIUS + 0.01, 70.0,
+                10.5, 10, 10, 70.0), "在目标列外面:那不叫悬在目标点上");
+    }
+
+    @Test
+    void holdingCostsNoThrustInsideTheDeadband() {
+        // 省电式悬停:飞行分支不施重力(见 Player.travel 的飞行分支),所以"什么都不按"
+        // 就是常态——死区里一格冲量都不加,只有真被顶开了才补一记最小推力。
+        int hold = FlightPlan.holdY(77.0, 68);
+        assertEquals(0, FlightPlan.verticalThrust(77.2, hold));
+        assertEquals(1, FlightPlan.verticalThrust(70.0, hold), "掉下去了就往上补");
+        assertEquals(-1, FlightPlan.verticalThrust(85.0, hold), "被顶上去了就往回收");
+    }
+
     // ==================== 走廊净空 ====================
 
     @Test

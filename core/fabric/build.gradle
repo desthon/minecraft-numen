@@ -23,9 +23,10 @@ dependencies {
 
     // 内嵌的联动模组。compileOnly:只有 Builtin 那道闸要看见它的 install 入口,
     // 类与资源由下面的 jar 块平铺进发行 jar,不作为独立依赖出现在 POM 里。
-    // 只有 YSM 与 Litematica:车万女仆没有 Fabric 版。
+    // 只有 YSM、Litematica 与 FTB Quests:车万女仆没有 Fabric 版。
     compileOnly project(':plugins:ysm')
     compileOnly project(':plugins:litematica')
+    compileOnly project(':plugins:ftbquests')
 }
 
 loom {
@@ -72,6 +73,7 @@ sourceSets.main.resources { srcDir 'src/generated/resources' }
 tasks.named('jar', Jar) {
     from({ project(':plugins:ysm').sourceSets.main.output })
     from({ project(':plugins:litematica').sourceSets.main.output })
+    from({ project(':plugins:ftbquests').sourceSets.main.output })
 }
 
 // Implement mcgradleconventions loader attribute

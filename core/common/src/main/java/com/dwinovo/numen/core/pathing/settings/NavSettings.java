@@ -95,7 +95,7 @@ public final class NavSettings {
      * {@link com.dwinovo.numen.core.pathing.moves.FlowCost#fallingWaterCost})。默认开。
      *
      * <p>上一轮它被留成硬墙,理由是"执行侧在液体里不按 JUMP、没有上浮输入,放行就是
-     * 能规划走不动"。本轮把那半个前提补上了:{@link com.dwinovo.numen.core.pathing.moves.Movement#strokeUp}
+     * 能规划走不动"。本轮把那半个前提补上了:{@link com.dwinovo.numen.core.pathing.moves.Movement#waterDrive}
      * 对身体泡在液体里的身体持续按跳(原版 {@code jumpInFluid} = 每 tick +0.04,正是浮力),
      * 于是逆着水柱也游得上去 —— 墙才改得成价。<b>水柱底部是要命地形(岩浆/火/岩浆块/
      * 虚空)时照旧不可穿</b>(见 {@code MovementHelper.fallingWaterTerminatesSafely})。

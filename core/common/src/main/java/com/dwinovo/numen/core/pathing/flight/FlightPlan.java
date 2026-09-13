@@ -3,13 +3,15 @@ package com.dwinovo.numen.core.pathing.flight;
 import java.util.function.IntPredicate;
 
 /**
- * 直线飞行的判据(纯函数):<b>该不该飞、巡航高度定在哪、这条线通不通、什么时候落地</b>。
+ * 直线飞行的判据(纯函数):<b>该不该飞、巡航高度定在哪、这条线通不通、什么时候落地、
+ * 到点之后是悬停还是落地</b>。
  *
  * <h2>为什么这些判据必须抽出来单测</h2>
  * 飞行没有"失败信号"可以依赖:撞墙不会被谁通知,她只会原地推空气(或更糟——贴着墙
  * 一路蹭)。于是"这条线过不过得去"、"抬到多高才过山"、"落点在哪"这三件事只能自己判,
  * 判错了的表现是<b>悬在半空</b>或者<b>卡在墙前不动</b>,两者在游戏里都很难和"她只是慢"
- * 区分开。世界读取一律以 {@link CellProbe}/{@link IntPredicate} 的形式传进来,判据本身
+ * 区分开。而"到点之后该悬停还是该落地"这条更隐蔽:判错的形态是<b>她一到地方就掉下来</b>
+ * (见 {@link #arrivalAction}),主人看到的是"她不肯留在那儿"。世界读取一律以 {@link CellProbe}/{@link IntPredicate} 的形式传进来,判据本身
  * 不碰 Minecraft,于是每一条都能用假世界单测(见 FlightPlanTest)。
  *
  * <h2>它不做什么</h2>
@@ -159,8 +161,10 @@ public final class FlightPlan {
      * 落点容差(格)。四分之一格。
      *
      * <p>脚进到落脚点上方这一带里,离地面已经不是"飞行悬停"而是"最后一步踩下去":
-     * {@code FlightDrive} 到这儿就停飞,剩下的交给重力(<b>停飞之后 flying 必须是 false,
-     * 不留一个挂在半空的身体</b>)。
+     * <b>落地意图</b>({@link Arrival#LAND})下 {@code FlightDrive} 到这儿就停飞,剩下的
+     * 交给重力(<b>停飞之后 flying 必须是 false,不留一个挂在半空的身体</b>)。悬停意图
+     * ({@link Arrival#HOVER})下这条判据不参与收场——她本来就要停在半空,见
+     * {@link #arrivalAction}。
      *
      * <p>为什么不是半格:半格高已经能看出她"悬在地面上方"了,而那正是这条活最坏的
      * 坏相。为什么不是 0:脚要像素级吻到那一格才算落地的话,任何一点残留速度都会让她
@@ -186,6 +190,77 @@ public final class FlightPlan {
     /** 落到落脚点了吗:脚已经进到落脚点上方 {@link #LANDING_TOLERANCE} 的带子里。 */
     public static boolean reachedLandingHeight(double y, int landingY) {
         return y <= landingY + LANDING_TOLERANCE;
+    }
+
+    // ==================== 到达之后:悬停,还是落地 ====================
+
+    /**
+     * 悬停高度至少要高出落脚点这么多格。
+     *
+     * <p>"停在目标点上方"不能只按巡航高度算:一段平地短途的巡航高度就等于落脚点高度
+     * (她站在 y=64 的平地上朝隔壁那一列飞,巡航 y 与落点 y 都是 64),照抄它就是"飞到了、
+     * 然后站在地上自称悬停"。所以悬停高度取"巡航高度"与"落点之上三格"里高的那个:低空
+     * 平飞时抬起一点,看得出她确实悬着;本来就飞得高的(越过山丘那种)一格都不用抬。
+     */
+    public static final int HOVER_CLEARANCE = 3;
+
+    /**
+     * 到达目标列之后的意图:{@link #HOVER} 保持悬停(默认),{@link #LAND} 落到地面上。
+     *
+     * <p>{@code fly_to} 的 {@code land} 参数就是这一位。<b>默认是悬停</b>——主人要的是
+     * "飞到地方之后她悬在原处",好继续吩咐别的动作;要她下来是另一句话
+     * ({@code land=true}),那是这条常驻状态的明确出口。
+     */
+    public enum Arrival { HOVER, LAND }
+
+    /** 到点这一刻的动作。 */
+    public enum Action { HOLD, DESCEND, STOP }
+
+    /**
+     * 到点这一刻该做什么 —— <b>本方法就是"到达后不再自动停飞"这条判据本身</b>。
+     *
+     * <p>上一轮的 bug 正是出在这条判据上:当时它不存在,{@code FlightDrive.arrive()} 无条件
+     * 走 {@code flightStop},"到了"和"停飞"被绑成一件事,主人看到的是她一到地方就掉下去。
+     * 现在"到了"之后的选择<b>由着陆意图决定</b>:
+     * <ul>
+     *   <li>{@link Arrival#HOVER} → {@link Action#HOLD},<b>永远不 STOP</b>。哪怕她已经贴在
+     *       落点那一格上(低空平飞)也不停飞:停飞那一刻飞行分支退出、重力接手,她就掉下去,
+     *       "保持"当场变成"落地";</li>
+     *   <li>{@link Arrival#LAND} → 踩到落脚点(或落进水里)才 {@link Action#STOP},没到就
+     *       继续 {@link Action#DESCEND} —— 下落段那条老规矩一字不变。</li>
+     * </ul>
+     *
+     * @param landed 她已经踩在落脚点上了(onGround / 在水里 / 进到落点容差带且那一格此刻
+     *               还站得住,三者之一;见 {@code FlightDrive} 的 DROP 段)
+     */
+    public static Action arrivalAction(Arrival intent, boolean landed) {
+        if (intent == Arrival.HOVER) {
+            return Action.HOLD;
+        }
+        return landed ? Action.STOP : Action.DESCEND;
+    }
+
+    /**
+     * 悬停时脚要停在多高:不低于她巡航的那一层,且在落脚点之上至少 {@link #HOVER_CLEARANCE} 格。
+     *
+     * <p>为什么取高者而不是一味往高处抬:她巡航的那一层已经被航线规划验过净空(见
+     * {@link #plan} 的第三段),而更高处没验过——那是一堵天花板可能就在的地方。所以
+     * "抬起一点"要由驱动现读一次世界来决定(见 {@code FlightDrive.enterHold}),读不过去
+     * 就退回巡航高度:悬停低一点,好过钻进天花板里。
+     */
+    public static int holdY(double cruiseY, int landingY) {
+        return Math.max((int) Math.floor(cruiseY), landingY + HOVER_CLEARANCE);
+    }
+
+    /**
+     * 悬停就位了吗:水平进到目标列那一圈,竖直进到死区。
+     *
+     * <p>只用来决定"这一刻起可以报'已悬停'了"(日志、{@code current_task} 那一行),
+     * 不参与控制——纠位是每刻都跑的({@link #verticalThrust} 的死区 + 水平惯性清零)。
+     */
+    public static boolean reachedHover(double x, double y, double z, int tx, int tz, double aimY) {
+        return arrivedHorizontally(x, z, tx + 0.5, tz + 0.5)
+                && Math.abs(y - aimY) <= VERTICAL_DEADBAND;
     }
 
     /** 水平面上到目标点多远(格)。 */

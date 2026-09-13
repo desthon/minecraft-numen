@@ -89,8 +89,15 @@ public class MovementDescend extends Movement {
         }
 
         BlockState below = context.get(destX, y - 2, destZ);
-        if (!MovementHelper.canWalkOn(context, destX, y - 2, destZ, below)) {
-            // 下面还空:转坠落分档
+        // 落点就在水面那一格(深处还有水)时交给坠落分档:那一支自上而下挑最上面那条
+        // "身体没入水面之下"的泳道(见 dynamicFallCost)。水面那一格自己不是泳位 ——
+        // 停在那一格身体露在水面上,原版进不了泳姿(实机"踩着水面走"就是这一格);
+        // 它只该在登岸那一步当踏脚点(见 MovementHelper.isExitPad)。
+        boolean landingOnSurfaceFloat = MovementHelper.isWater(destDown)
+                && MovementHelper.isSurfaceFloat(context.view, context.loadedTest, destX, y - 1, destZ);
+        if (landingOnSurfaceFloat
+                || !MovementHelper.canWalkOn(context, destX, y - 2, destZ, below)) {
+            // 下面还空(或落点只是水面那一格):转坠落分档
             dynamicFallCost(context, x, y, z, destX, destZ, totalCost, below, res);
             return;
         }
@@ -145,9 +152,9 @@ public class MovementDescend extends Movement {
             double tentativeCost = WALK_OFF_BLOCK_COST
                     + FALL_N_BLOCKS_COST[unprotectedFallHeight] + frontBreak + costSoFar;
             if (reachedMinimum && MovementHelper.isWater(ontoBlock)) {
-                if (!MovementHelper.canWalkThrough(context, destX, newY, destZ, ontoBlock)) {
-                    return false;
-                }
+                // 这一格水能不能当落水点,由下面的泳道挑选裁决(要真泳位 + 身体占得住);
+                // 这里不再按"水面那一格"那一套判 canWalkThrough —— 往下扫到的常常是
+                // 水面之下那几格,它们在旧口径下"头没出水"一律不算可穿。
                 if (context.assumeWalkOnWater) {
                     return false;
                 }
@@ -177,24 +184,33 @@ public class MovementDescend extends Movement {
                         return false;
                     }
                 }
-                // 落水,不需要水桶。落点必须是<b>泳位</b>(可站的水那几层,见
-                // MovementHelper.isSwimLane):湖底那一格在模型里站不住(沉底的人头在水下),
-                // 落在那儿节点就废了 —— 往下循环是从"低 3 格"开始扫的,常常先扫到湖底,
-                // 于是这里要往上一层层找回去,最多找 SWIM_LANE_LOOKUP 格。
-                // 找不到泳位就整趟放弃,让规划器去试"走进水里"那条路。
-                res.x = destX;
-                res.z = destZ;
-                res.cost = tentativeCost;
-                for (int up = 0; up <= SWIM_LANE_LOOKUP; up++) {
-                    int laneY = newY + up;
-                    // canWalkOn 判的是**支撑格**:节点 laneY 合不合法要看 laneY-1
-                    // (与搜索里其余几处同一把尺;水那一支也是这么翻的,见 canWalkOnPosition)。
-                    if (MovementHelper.canWalkOn(context, destX, laneY - 1, destZ)) {
-                        res.y = laneY;
-                        return false; // 泳位(水面那一格 / 水柱里浮着的那几格)
-                    }
-                    if (!MovementHelper.isFloatableLiquid(context, destX, laneY, destZ)) {
+                // 落水,不需要水桶。落点必须是<b>泳位</b>(见 MovementHelper.isSwimLane):
+                // 泳位现在只在水面<b>之下</b>那几格(水面那一格上面就是空气,身体露在水面上,
+                // 原版进不了泳姿 —— 实机表现就是"踩着水面走"),湖底那一格照旧不是路
+                // (脚踩实心、头在水下是憋气)。往下这个循环是从"低 3 格"开始扫的,
+                // 先扫到的偏深,所以先往上找到这条水柱的<b>顶层</b>,再自上而下取第一格
+                // 站得住的泳位 —— 那才是"头刚好没入水面"的那一层,而不是贴着湖底那格。
+                // 找不到泳位就整趟放弃(记 COST_INF),让规划器去试"走进水里"那条路。
+                res.cost = COST_INF;
+                int top = newY;
+                for (int up = 1; up <= SWIM_LANE_LOOKUP; up++) {
+                    if (!MovementHelper.isFloatableLiquid(context, destX, newY + up, destZ)) {
                         break; // 出了水柱,上面再找也不是水
+                    }
+                    top = newY + up;
+                }
+                for (int laneY = top; laneY >= newY; laneY--) {
+                    // 直接问"这一格是不是泳道"(身体没入水面之下),而不是 canWalkOn:
+                    // canWalkOn 也认"出水的踏脚点"(见 MovementHelper.isExitPad),
+                    // 而落水点要的是真泳位,不是水面那一格。还要身体真占得住那一格
+                    // (水封方块等异常情形除外,见 canWalkThroughPosition 的泳道那一支)。
+                    if (MovementHelper.isSwimLaneAt(context, destX, laneY, destZ)
+                            && MovementHelper.canWalkThrough(context, destX, laneY, destZ)) {
+                        res.x = destX;
+                        res.z = destZ;
+                        res.y = laneY;
+                        res.cost = tentativeCost;
+                        return false; // 泳位(水面之下浮着的那一层 / 水柱里浮着的那几格)
                     }
                 }
                 return false;

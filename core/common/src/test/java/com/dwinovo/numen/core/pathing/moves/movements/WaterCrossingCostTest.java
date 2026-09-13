@@ -257,27 +257,32 @@ class WaterCrossingCostTest {
     // ==================== 深水:游泳位与三步水路 ====================
 
     /**
-     * 泳道在哪:浮着的水才算泳位 —— 深水(3 格)的泳道是<b>水面那一格</b>与其下一格,
-     * 湖底那一格不算(沉底的人头在水下,是憋气不是游泳)。
+     * 泳道在哪:<b>水面之下</b>那一格(脚泡在水里、头顶还有水),不是水面那一格。
      *
      * <p><b>入参是支撑格,不是身位格</b>(与实心方块同一把尺):{@code canWalkOn(x,y,z)}
-     * 问的是"能不能站在 (x,y,z) 上",节点就在 {@code y+1}。上一轮水那一支把入参当成了
-     * 身位格,整条泳道被抬高了一格:水面那一格<b>之上</b>的空气格也进了泳道
-     * (实机:泳道节点 63、水面水格 62),而那一格脚下不是水、浮力挂不住 ——
-     * 规划出来的泳位永远站不住,身体每 21 刻判一次"脱轨"取消重算。
+     * 问的是"能不能站在 (x,y,z) 上",节点就在 {@code y+1}。
+     *
+     * <p>水面那一格单独存在时<b>不是路</b>:它上面就是空气,身体露在水面上,
+     * 原版 {@code updateSwimming} 的准入(疾跑 + 眼睛在水里)不成立 —— 实机 12:45 的
+     * 日志正是"泳道节点 62(水面格)、身位 63(水面之上)",表现就是踩着水面走。
+     * 它只在紧挨着岸、下一步能登岸时留下一格当踏板(见 MovementHelper 里的水面踏脚点判据),
+     * 湖中央的水面格四邻不是水就是更深的岸,自然不算路。
      */
     @Test
-    void swimLaneIsTheFloatingWater() {
+    void swimLaneIsTheWaterUnderTheSurface() {
         FakeView v = channel(3, false);
         assertTrue(MovementHelper.canWalkThrough(v, at(1, TOP_WATER)), "顶层水格应可穿行");
         assertTrue(MovementHelper.canWalkThrough(v, at(1, SHORE_FEET)), "水面上方应是空气");
-        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 1)),
-                "支撑格是水面下一格的水 → 节点「水面那一格」就是泳位(脚泡在水里,浮着)");
         assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 2)),
-                "再往下一格(脚下一格还是水)同样浮着,可站");
+                "支撑格是水面下一格的水 → 节点「水面下一格」才是泳位(脚在水里、头顶还有水)");
+        assertFalse(MovementHelper.canWalkOn(v, at(2, TOP_WATER - 1)),
+                "湖中央的水面那一格不是路:身体露在水面上,进不了泳姿(踩着水面走的正源)");
+        assertTrue(MovementHelper.canWalkOn(v, at(1, TOP_WATER - 1)),
+                "紧挨着岸的水面那一格留着当登岸踏板(见 isExitPad),否则从水里上不了岸");
         assertFalse(MovementHelper.canWalkOn(v, at(1, TOP_WATER)),
                 "水面之上的那一格(空气)不是泳位 —— 脚不在水里,浮力挂不住它");
     }
+
 
     /**
      * 湖底那一格<b>不</b>是路:脚踩着石头、头在水下 —— 沉底游泳是憋气,
@@ -303,16 +308,23 @@ class WaterCrossingCostTest {
         MovementDescend.cost(ctx, 0, SHORE_FEET, 0, 1, 0, res);
         assertTrue(res.cost > 0 && res.cost < COST_INF,
                 "从岸上跨进深水应可规划(descend),实为 " + res.cost);
-        assertEquals(TOP_WATER, res.y, "落点应正好是游泳位那一层");
+        assertEquals(TOP_WATER - 1, res.y,
+                "落点应正好是水面之下的泳道那一层(不是水面那一格 —— 那一格身体露在水面上)");
 
-        double inWater = Moves.TRAVERSE_EAST.cost(ctx, 1, TOP_WATER, 0);
+        double inWater = Moves.TRAVERSE_EAST.cost(ctx, 1, TOP_WATER - 1, 0);
         assertTrue(inWater > 0 && inWater < COST_INF, "水里横渡应可规划,实为 " + inWater);
-        double inWater2 = Moves.TRAVERSE_EAST.cost(ctx, 2, TOP_WATER, 0);
+        double inWater2 = Moves.TRAVERSE_EAST.cost(ctx, 2, TOP_WATER - 1, 0);
         assertTrue(inWater2 > 0 && inWater2 < COST_INF, "水带中段应可规划,实为 " + inWater2);
+        assertTrue(Moves.TRAVERSE_EAST.cost(ctx, 1, TOP_WATER, 0) >= COST_INF,
+                "湖中央的水面那一格不许当巡航路(身体在其上时露在水面外,进不了泳姿)");
 
+        // 出水的两步:泳道 → 紧挨着岸的水面踏板 → 岸。横一格再上一格,上升原语刚好够。
+        double stepOntoPad = MovementAscend.cost(ctx, 2, TOP_WATER - 1, 0, 3, 0);
+        assertTrue(stepOntoPad > 0 && stepOntoPad < COST_INF,
+                "从泳道横一格上一格、落到岸边的水面踏板,应可规划,实为 " + stepOntoPad);
         double outOfWater = MovementAscend.cost(ctx, 3, TOP_WATER, 0, 4, 0);
         assertTrue(outOfWater > 0 && outOfWater < COST_INF,
-                "从水里爬上对岸应可规划(ascend),实为 " + outOfWater);
+                "从水面踏板登上对岸应可规划(ascend),实为 " + outOfWater);
 
         double onLand = Moves.TRAVERSE_EAST.cost(ctx, 4, SHORE_FEET, 0);
         assertTrue(onLand > 0 && onLand < COST_INF, "岸上平走作为对照应可规划,实为 " + onLand);
@@ -544,7 +556,7 @@ class WaterCrossingCostTest {
         int lane = TOP_WATER - 1; // 水柱里浮着的那一格(脚下一格还是水 → 浮着档)
 
         double bedCost = Moves.TRAVERSE_EAST.cost(ctx, 1, bed, 0);
-        double laneCost = Moves.TRAVERSE_EAST.cost(ctx, 1, TOP_WATER, 0); // 泳道 = 水面那一格
+        double laneCost = Moves.TRAVERSE_EAST.cost(ctx, 1, lane, 0); // 泳道 = 水面之下那一格
         assertTrue(bedCost >= ActionCosts.WALK_ONE_IN_WATER_COST - 1e-9,
                 "深水里贴着湖底走一格也该是水价,不能因为身位通透就吃疾跑折扣(实为 " + bedCost + ")");
         assertTrue(bedCost > ActionCosts.WALK_ONE_BLOCK_COST * 1.5,
@@ -587,21 +599,24 @@ class WaterCrossingCostTest {
 
     /**
      * 水里按住跳会把身体<b>往上</b>顶:这条是"不沉"的执行侧来源,也是"逆着水柱游得
-     * 上去"的前提。闸门是 {@link Movement#strokeUp}(纯判据的钉子见
-     * {@code MovementBuoyancyTest}):<b>身体泡在液体里</b>且还没浮到泳道以上就按,
+     * 上去"的前提。闸门是 {@link Movement#waterDrive}(纯判据的钉子见
+     * {@code MovementBuoyancyTest}):<b>身体泡在液体里</b>且还没到泳道层就按,
      * 浅水涉水不按 —— 否则浅水里会一路蹦。
      *
-     * <p>这里复现的就是实机那个状态:身体浮在水面、<b>脚那一格已经落在水面上方那一格
-     * (空气)</b>里。上一轮的闸门问"脚那格是不是水",在这里恒为假 —— 泳道那一格永远
-     * 浮不住;现在的闸门问实体自己的液体状态,照样往上划。
+     * <p>这里顺带钉住实机那个状态的内因:身体还在泳道之上、又没进泳姿时<b>必须收疾跑</b>
+     * —— 原版 {@code getFluidFallingAdjustedMovement} 一见 {@code isSprinting()} 就原样返回,
+     * 水里疾跑等于关掉重力,人就永远挂在液面上"踩水走"。
      */
     @Test
     void floatingBodyGetsTheBuoyancyStroke() {
-        assertTrue(Movement.strokeUp(true, false, false, 62.6, 63),
-                "脚那格是空气、身体还在水里、泳道在上一格 → 必须划水");
-        assertTrue(Movement.strokeUp(true, false, true, 60.0, 62), "水柱里浮着(离地)→ 每 tick 按跳");
-        assertFalse(Movement.strokeUp(true, true, false, 62.0, 62),
+        assertTrue(Movement.waterDrive(true, false, true, true, 60.0, 62).strokeUp(),
+                "水柱里浮着(离地)→ 每 tick 按跳,划到泳道那一层");
+        assertTrue(Movement.waterDrive(true, false, false, true, 61.5, 62).strokeUp(),
+                "泳道在 62、身位还在 61.5 → 继续划");
+        assertFalse(Movement.waterDrive(true, true, false, false, 62.0, 62).strokeUp(),
                 "浅水涉水:踩得到底、水没到身体 → 不按跳(按了会变成一路蹦)");
+        assertFalse(Movement.waterDrive(true, false, false, true, 62.5, 62).sprint(),
+                "身体在泳道之上、又没进泳姿 → 收疾跑,让原版水里的重力把人压下去");
         // 与"水价档位"同一个位置概念:浮着那一档仍由 isFloatingAt 选(见 waterTierCost)。
         CalculationContext deep = context(waterColumn(0, 2, 64, 60));
         assertTrue(MovementHelper.isFloatingAt(deep, 1, 62, 0), "深水泳道那一格是浮着的(浮着档价)");

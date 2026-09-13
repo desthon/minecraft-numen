@@ -103,6 +103,22 @@ public final class InputDriver {
     }
 
     // ---- 飞行输入(创造/旁观这类"允许飞"的画像;见 core 的 FlightDrive) ----
+    //
+    // 三种姿态,一条不变式:
+    //   起飞   flightStart                     把 flying 置真(理由见下面那一段)
+    //   飞/悬停 flyToward / flyVertical / killHorizontalDrift   每刻写输入与冲量
+    //   收飞   flightStop                      把 flying 清零
+    // 不变式:<b>{@code flying == true} 只允许存在于"有一个活着的任务在接管这具身体"的时候。</b>
+    // 悬停是这条不变式里唯一"看着像漏了"的一态:主人要的正是"她飞到了就停在那儿,别掉下来",
+    // 所以到点那一刻<b>故意不停飞</b>,由那个还活着的任务每刻接管(纠位 + 复核许可);
+    // 任务一收场(被别的动作顶替 / 被叫停 / 被本能抢占 / 许可被收回 / 身体离开世界)当刻走
+    // flightStop。留着一位没有主的 flying,她就一直挂在半空——飞行分支不施重力——而这一位
+    // 还随 .dat 落盘。
+    //
+    // 悬停因此<b>不必每刻加冲量</b>:原版 {@code Player.travel} 的飞行分支把竖直速度写成
+    // "进入这一刻的值 × 0.6"(0.6d 就在那条分支里,随后 resetFallDistance),原版那一记重力
+    // 根本留不下来;速度衰减到零之后她不升也不降。坏相因此不是"缓慢下坠",而是<b>停飞</b>:
+    // flying 一清零就走 LivingEntity 那条带重力的分支,她立刻掉下去。
 
     /**
      * 这一刻到底能不能飞 —— <b>本类的防御性第二道闸</b>。
@@ -144,6 +160,10 @@ public final class InputDriver {
      * <p>{@code onUpdateAbilities()} 是原版的通告口(把整份 abilities 发出去)。自己
      * 那次发送的接收端是一个空壳连接,所以它真正的价值在另一半:凡是后续会给她发
      * 能力包的路径(切模式、重生)拿到的都是同一份事实,而不是两个地方各记一半。
+     *
+     * <p>这一位置真之后<b>可以一直真着</b>:悬停(见 {@code FlightPlan.Arrival#HOVER})
+     * 就是"飞着不动",由那个还活着的任务每刻接管。要不要清零只看一件事——<i>还有没有
+     * 主</i>,见 {@link #flightStop} 与本节开头的不变式。
      */
     public static boolean flightStart(ServerPlayer p) {
         if (!flightPermitted(p)) {
@@ -160,9 +180,14 @@ public final class InputDriver {
     /**
      * 收飞:{@code flying} 清零并通告。
      *
-     * <p><b>每一次飞行收场都必须走这里</b>(到点、被取消、被抢占、切回生存)。留着
+     * <p><b>每一次飞行收场都必须走这里</b>(被取消、被抢占、切回生存、身体离场)。留着
      * {@code flying=true} 的身体不会自己落地——飞行分支不施重力,她只会一直飘着;
      * 而且这一位是<b>随 .dat 存档</b>的,休眠再回来还飘着。
+     *
+     * <p><b>唯一的例外是悬停</b>:她飞到地方之后按吩咐停在空中,那一刻的 {@code flying}
+     * 是<b>故意留着</b>的(见 {@code FlightPlan.Arrival#HOVER}),因为那条活的常态就是
+     * "飞着不动"。例外之所以安全,是因为它有主:任务还在 tick 这具身体,而任务收场的那
+     * 几条路(被顶替 / 被叫停 / 被抢占 / 许可收回 / 身体离场)全都走到这里。
      *
      * <p><b>这里故意不设闸</b>(与 {@link #flightStart} 不对称):许可被收回、档位切成
      * 生存的那一刻,正是最需要把这一位清掉的时候。清一位永远不会让她飞起来,所以这条
@@ -212,6 +237,9 @@ public final class InputDriver {
      * <p>这是本类第二处、也是最后一处直接写 {@code deltaMovement} 的地方(第一处是
      * {@link #thrust} 那一记与客户端同源的竖直冲量)。它对应真玩家的一个动作:
      * 松开前进键并把速度吃住——原版那点滑行在这里是"没到点"。
+     *
+     * <p>悬停也靠它:悬停段只推竖直方向(见 {@link #flyVertical}),不带前进键,
+     * 而巡航速度还在身上——每刻不把水平惯性吃掉,她就会从目标点上方一路飘走。
      */
     public static void killHorizontalDrift(ServerPlayer p) {
         Vec3 v = p.getDeltaMovement();
@@ -233,7 +261,13 @@ public final class InputDriver {
                 dir * p.getAbilities().getFlyingSpeed() * FLIGHT_THRUST_SCALE, 0.0));
     }
 
-    /** Zero all locomotion input. Call each tick while idle/arrived. */
+    /**
+     * Zero all locomotion input. Call each tick while idle/arrived.
+     *
+     * <p><b>它只清输入,不碰 {@code flying}</b>:悬停的稳态恰恰就是"零输入 + 仍在飞"
+     * (见本节开头的不变式),所以 {@code halt} 是悬停姿态的一部分,不是它的收场。
+     * 收场的口子是 {@link #flightStop},由任务层在收场那一刻调——不是每个"站住"的地方。
+     */
     public static void halt(ServerPlayer p) {
         p.zza = 0.0f;
         p.xxa = 0.0f;
