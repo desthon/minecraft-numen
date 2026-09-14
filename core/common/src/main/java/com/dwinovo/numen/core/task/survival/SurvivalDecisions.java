@@ -60,24 +60,75 @@ public final class SurvivalDecisions {
     public static final double MLG_SETTLED_SPEED = -0.5;
 
     // ---- breath thresholds (vanilla air is 0..300 ticks; damage starts at 0) ----
-    /**
-     * Air ticks at/below which surfacing takes the body. 240 leaves a ~3-second
-     * dip tolerance (normal head-bobs while swimming don't trigger), while the
-     * remaining 12 seconds of air are ample for any plausible swim-up. The band
-     * between wake (240) and full (300) also gives an idle body in deep water a
-     * natural bob cycle: sink → head under → air dips past 240 → surface → refill
-     * — a fake player has no client holding the jump key, so this chain IS its
-     * float instinct.
-     */
-    public static final int LOW_AIR_TICKS = 240;
+    //
+    // 口径:**不是"一没顶就浮",是"氧气快见底才浮"**。原版 300 刻满氧;一线 240
+    // (剩 12 秒就上去)在实机里表现成"游三秒就浮一次头" —— 每次上浮都要抢占身体、
+    // 打断当前这一段泳道,于是长距离横渡被切成一节一节(主人 2026-09-14 的原话:
+    // "游泳距离仍然有点短,换气太过频繁")。现在余量按**还差几格才出水**算,只在
+    // 真快憋不住时动手。
+
+    /** <b>上浮余量的地板(刻)</b>:还剩 3 秒时就无论如何都要上去。 */
+    public static final int AIR_RESERVE_FLOOR = 60;
 
     /**
-     * 换气触发条件:头没在水里且氧气见底。头一出水面立刻不触发(氧气自己回),
-     * 氧气还够也不触发。
+     * <b>每格水深换算的余量(刻/格)</b>。泳姿上浮的终端速度约 0.16 格/刻
+     * (= 0.04 的划水冲量过水阻 0.8 之后 ≈ 6 刻/格),这里按 8 刻/格留一倍余量。
      */
-    public static boolean breathTriggered(boolean headUnderWater, int airSupply) {
-        return headUnderWater && airSupply <= LOW_AIR_TICKS;
+    public static final int AIR_TICKS_PER_BLOCK_UP = 8;
+
+    /** 余量封顶(刻):再深也不许"预留"吃掉整罐氧气,否则深水里永远在换气。 */
+    public static final int AIR_RESERVE_CAP = 180;
+
+    /**
+     * 头顶被冰面/岩层封住时要留的余量(刻):那<b>不是</b>直着上去,而是横着游去找
+     * 最近的透气口({@code BreathChain#findAirColumn},最坏要走满搜索半径 16 格),
+     * 所以这里保持原来那条宽口径。
+     */
+    public static final int SEALED_CEILING_AIR_TICKS = 240;
+
+    /** 上浮所需的氧气预留:<b>正上方还有几格水,就要留几格往上划的时间</b>。 */
+    public static int airReserve(int blocksToSurface) {
+        return Math.min(AIR_RESERVE_CAP,
+                Math.max(AIR_RESERVE_FLOOR, blocksToSurface * AIR_TICKS_PER_BLOCK_UP));
     }
+
+    /**
+     * 换气触发条件:头没在水里,且氧气已经低到<b>只够她游上去</b>。头一出水面立刻不
+     * 触发(氧气自己会回),氧气还够也不触发。
+     *
+     * @param headUnderWater  眼睛此刻泡在水里
+     * @param airSupply       原版氧气质(0..300)
+     * @param blocksToSurface 正上方还有几格水(不是直上时给 0 即可)
+     * @param sealedCeiling   头顶被封住(要走横向找口子),余量按
+     *                        {@link #SEALED_CEILING_AIR_TICKS} 走
+     */
+    public static boolean breathTriggered(boolean headUnderWater, int airSupply,
+                                          int blocksToSurface, boolean sealedCeiling) {
+        if (!headUnderWater) {
+            return false;
+        }
+        return airSupply <= (sealedCeiling
+                ? SEALED_CEILING_AIR_TICKS
+                : airReserve(blocksToSurface));
+    }
+
+    /**
+     * 无畏画像(创造:物理伤害免疫、氧气通常根本不掉)的漂浮本能的触发条件。
+     *
+     * <p>这条本能存在的唯一理由,是假玩家没有客户端替它按住跳键 —— <b>闲置</b>在深水里
+     * 会一路沉底。它不该去打断一个正在开船的导航:导航的泳道处置本来就会把人稳在泳道
+     * 层,而在创造档憋气既不掉氧也不掉血,浮上去除了把这一段泳道打断之外没有任何收益
+     * (实机里那 60 刻一跳的旧口径就是这个毛病)。
+     *
+     * @param submergedTicks 眼睛连续泡在水里的刻数
+     * @param navigating     此刻有没有导航在驱动这具身体({@code PathingCore#isPathing})
+     */
+    public static boolean floatInstinctTriggered(int submergedTicks, boolean navigating) {
+        return !navigating && submergedTicks > FEARLESS_FLOAT_DELAY_TICKS;
+    }
+
+    /** 无畏画像下没顶多久才认作"闲置沉底"(刻):10 秒,留给换段/重规划的空档。 */
+    public static final int FEARLESS_FLOAT_DELAY_TICKS = 200;
 
     // ---- hunger thresholds (vanilla: below 6 you can't sprint; below 18 regen stops) ----
     /**

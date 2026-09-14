@@ -78,6 +78,9 @@ public final class CompanionFactory {
             mode = GameType.CREATIVE;
         }
         player.setGameMode(mode);
+        // 同档重设时原版会提前返回,而 invulnerable 不随 .dat 存取(见 Companions#restoreUnpersistedAbilities):
+        // 创造档同伴重登后必须补回来,否则"免伤"只是画像上的一句话——她照样掉氧、照样被淹。
+        Companions.restoreUnpersistedAbilities(player);
         // 身体齐了、进了玩家列表,插件此刻可以对它下命令(改外观、发指令都需要它在列表里)
         CompanionEvents.fire(CompanionEvent.SPAWN, player);
         return player;

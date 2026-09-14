@@ -6,6 +6,7 @@ import com.dwinovo.numen.entity.InputDriver;
 import com.dwinovo.numen.core.WorkProfile;
 import com.dwinovo.numen.task.Task;
 import com.dwinovo.numen.task.TaskState;
+import com.dwinovo.numen.core.pathing.execute.PathingCore;
 import com.dwinovo.numen.core.task.survival.SurvivalDecisions;
 import com.dwinovo.numen.entity.NumenPlayer;
 import net.minecraft.core.BlockPos;
@@ -21,8 +22,9 @@ import net.minecraft.world.phys.Vec3;
  * holding the jump key: navigation strokes it afloat only while a move is being
  * executed, so a body left idle in deep water (a task that ended mid-swim, an
  * owner Stop, plain wandering) sinks, runs out of air, and drowns. This chain
- * polls head-submersion + air supply each tick; once air dips past
- * {@link SurvivalDecisions#LOW_AIR_TICKS} it takes the body, swims straight up
+ * polls head-submersion + air supply each tick; once air dips down to the
+ * reserve the remaining swim-up actually needs ({@link SurvivalDecisions#airReserve}
+ * — a few seconds, not the twelve it used to keep) it takes the body, swims straight up
  * until the head clears the water, then goes dormant — the wake/refill band
  * gives an idle body in deep water a natural bob cycle instead of a grave.
  *
@@ -58,29 +60,31 @@ public final class BreathChain implements Task, com.dwinovo.numen.task.reflex.Re
     private boolean trappedNoted;
     /** 无畏画像的入水计时(不扣氧,改按持续没顶时间触发漂浮)。 */
     private int submergedTicks;
-    /** 没顶多久后开始上浮——对齐生存端低氧窗口的量级(300-240=60 tick,3 秒)。 */
-    private static final int FEARLESS_FLOAT_DELAY_TICKS = 60;
 
     public BreathChain() {
     }
 
     @Override
     public boolean canRun(NumenPlayer companion) {
+        boolean eyesInWater = companion.isEyeInFluid(FluidTags.WATER);
         // 无畏画像(创造)不扣氧气,airSupply 恒满——但这条反射是假玩家唯一的
-        // 漂浮本能,不能跟着休眠(否则闲置沉底就永远留在水底)。改按
-        // "眼在水下持续 N tick"触发,窗口对齐生存的低氧阈值。
+        // 漂浮本能,不能跟着休眠(否则闲置沉底就永远留在水底)。它在创造档只认
+        // "闲置沉底":导航在开船时不抢身体(见 SurvivalDecisions#floatInstinctTriggered)。
+        // 余量按"还差几格才出水"给:直上的水柱自己数,头顶封住的那种要横着去找透气口,
+        // 余量走宽口径(见 SurvivalDecisions)。这一票两条画像共用 —— 创造档若还有别的
+        // 路子漏掉 invulnerable(能力位不随 .dat 存取,见 Companions#restoreUnpersistedAbilities),
+        // 她照样会憋气,这里兜住。
+        boolean sealed = eyesInWater && ceilingSealed(companion);
+        boolean airLow = SurvivalDecisions.breathTriggered(eyesInWater, companion.getAirSupply(),
+                eyesInWater ? waterAbove(companion) : 0, sealed);
         boolean triggered;
         if (WorkProfile.of(companion).fearless()) {
-            if (companion.isEyeInFluid(FluidTags.WATER)) {
-                submergedTicks++;
-            } else {
-                submergedTicks = 0;
-            }
-            triggered = submergedTicks > FEARLESS_FLOAT_DELAY_TICKS;
+            submergedTicks = eyesInWater ? submergedTicks + 1 : 0;
+            triggered = airLow
+                    || SurvivalDecisions.floatInstinctTriggered(submergedTicks, navigating(companion));
         } else {
             submergedTicks = 0;
-            triggered = SurvivalDecisions.breathTriggered(
-                    companion.isEyeInFluid(FluidTags.WATER), companion.getAirSupply());
+            triggered = airLow;
         }
         if (!triggered && episodeActive) {
             noteEpisode(companion);   // head just cleared the water — close the episode
@@ -114,6 +118,37 @@ public final class BreathChain implements Task, com.dwinovo.numen.task.reflex.Re
         }
         InputDriver.jump(companion);   // in water this is the per-tick swim-up stroke
         return TaskState.RUNNING;
+    }
+
+    /**
+     * 正上方还有几格水(数到第一格不是水为止,最多数 {@link #CEILING_PROBE} 格)——
+     * 上浮余量的依据:几格水,就要留几格往上划的时间。
+     */
+    private static int waterAbove(NumenPlayer companion) {
+        Level level = companion.level();
+        BlockPos p = BlockPos.containing(companion.getEyePosition());
+        int n = 0;
+        for (int i = 0; i < CEILING_PROBE; i++) {
+            p = p.above();
+            if (!level.getFluidState(p).is(FluidTags.WATER)) {
+                break;
+            }
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * 此刻有没有导航在驱动这具身体({@code PathingCore#isPathing})。创造档的漂浮本能
+     * 靠它把"闲置沉底"和"正在游过去"分开:后者不该被打断。
+     */
+    private static boolean navigating(NumenPlayer companion) {
+        for (PathingCore core : PathingCore.liveCores()) {
+            if (core.player() == companion && core.isPathing()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

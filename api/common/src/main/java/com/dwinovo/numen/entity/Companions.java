@@ -404,6 +404,35 @@ public final class Companions {
         }
         body.setGameMode(creative ? net.minecraft.world.level.GameType.CREATIVE
                 : net.minecraft.world.level.GameType.SURVIVAL);
+        restoreUnpersistedAbilities(body);
+    }
+
+    /**
+     * 补回那些<b>原版不持久化</b>的能力位。
+     *
+     * <p>{@code Player#addAdditionalSaveData} 存的能力位只有 flying/mayfly/instabuild/
+     * mayBuild/walkSpeed/flySpeed —— <b>{@code invulnerable} 不在其中</b>,它只在
+     * {@code GameType#updatePlayerAbilities} 里、也就是"档位真的变了"那一次才被写。
+     * 于是创造档同伴一重登就落到"instabuild=true 而 invulnerable=false"的半个状态:
+     * 画像说她免伤,身体照扣血。最直接的一条是氧气 —— {@code Player#decreaseAirSupply}
+     * 正是看这一位决定扣不扣,实机里她在创造档照样掉氧(2026-09-14 日志 worst air 只剩
+     * 11 秒),换气反射因此每隔三秒抢一次身体,长距离横渡被切成一节一节。
+     *
+     * <p>只往允许的方向补:创造档漏了才补 true,生存档一个字节都不碰(切回生存时原版的
+     * {@code updatePlayerAbilities} 自己会清)。幂等。
+     */
+    public static void restoreUnpersistedAbilities(NumenPlayer body) {
+        if (body == null) {
+            return;
+        }
+        net.minecraft.world.entity.player.Abilities abilities = body.getAbilities();
+        if (abilities.instabuild && !abilities.invulnerable) {
+            abilities.invulnerable = true;
+            body.onUpdateAbilities();
+            com.dwinovo.numen.Constants.LOG.info(
+                    "[numen] {}:创造档但 abilities.invulnerable 是 false —— 已补上(原版不持久化这一位)",
+                    body.getGameProfile().getName());
+        }
     }
 
     /**

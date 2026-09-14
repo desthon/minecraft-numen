@@ -52,4 +52,12 @@ public record WorkProfile(
         body.onUpdateAbilities();
         return true;
     }
+
+    /**
+     * 同一类"原版不持久化的能力位"还有 {@code invulnerable}(氧气与伤害都看它,
+     * {@code Player#decreaseAirSupply} 就是一份;创造档同伴重登后会落到
+     * "instabuild=true 而 invulnerable=false" 的半个状态)。它落在同伴身体那一层,
+     * 见 {@code Companions#restoreUnpersistedAbilities} —— 那里在 {@code setGameMode}
+     * 之后补一次,和这里补 {@code mayfly} 是同一条理由。
+     */
 }

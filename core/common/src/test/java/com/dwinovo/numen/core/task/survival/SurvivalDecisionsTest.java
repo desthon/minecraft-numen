@@ -131,19 +131,54 @@ class SurvivalDecisionsTest {
     // ---- 换气 ----
 
     @Test
-    void lowAirUnderwaterSurfaces() {
-        assertTrue(SurvivalDecisions.breathTriggered(true, SurvivalDecisions.LOW_AIR_TICKS));
-        assertTrue(SurvivalDecisions.breathTriggered(true, 0));
+    void onlyNearEmptyAirTakesTheBody() {
+        // 换气不是"一没顶就浮":剩 12 秒(旧的 240 那条线)时氧气还够游很远,
+        // 抢身体只会把这一段泳道打断(实机"游三秒浮一次头")
+        assertFalse(SurvivalDecisions.breathTriggered(true, 240, 0, false));
+        assertFalse(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.AIR_RESERVE_FLOOR + 1, 0, false));
+        assertTrue(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.AIR_RESERVE_FLOOR, 0, false));
+        assertTrue(SurvivalDecisions.breathTriggered(true, 0, 0, false));
     }
 
     @Test
-    void plentyOfAirDoesNotSurface() {
-        assertFalse(SurvivalDecisions.breathTriggered(true, 300));
+    void deeperWaterKeepsMoreAirForTheSwimUp() {
+        // 正上方 10 格水:留 8 刻/格的口子往上划
+        assertEquals(80, SurvivalDecisions.airReserve(10));
+        assertTrue(SurvivalDecisions.breathTriggered(true, 80, 10, false));
+        assertFalse(SurvivalDecisions.breathTriggered(true, 81, 10, false));
+        // 地板与封顶都在:浅水不因"没什么可潜"而提前浮,深水也不吃掉整罐氧气
+        assertEquals(SurvivalDecisions.AIR_RESERVE_FLOOR, SurvivalDecisions.airReserve(0));
+        assertEquals(SurvivalDecisions.AIR_RESERVE_FLOOR, SurvivalDecisions.airReserve(3));
+        assertEquals(SurvivalDecisions.AIR_RESERVE_CAP, SurvivalDecisions.airReserve(64));
+        // 单调不减:越深留得越多
+        assertTrue(SurvivalDecisions.airReserve(30) >= SurvivalDecisions.airReserve(10));
+    }
+
+    @Test
+    void sealedCeilingKeepsTheWideReserve() {
+        // 头顶被冰面/岩层封住:要横着游去找最近的透气口,余量照旧给宽
+        assertTrue(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.SEALED_CEILING_AIR_TICKS, 0, true));
+        assertFalse(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.SEALED_CEILING_AIR_TICKS + 1, 0, true));
     }
 
     @Test
     void headAboveWaterDoesNotSurface() {
         // 头一出水面立刻不触发:氧气自己会回,再占着身体就成了在水面发呆
-        assertFalse(SurvivalDecisions.breathTriggered(false, 0));
+        assertFalse(SurvivalDecisions.breathTriggered(false, 0, 0, false));
+    }
+
+    @Test
+    void fearlessFloatInstinctNeverInterruptsNavigation() {
+        // 创造档不扣氧也不掉血:漂浮本能只为"闲置沉底",导航在开船时不抢身体
+        assertFalse(SurvivalDecisions.floatInstinctTriggered(100_000, true));
+        assertFalse(SurvivalDecisions.floatInstinctTriggered(10, false));
+        assertTrue(SurvivalDecisions.floatInstinctTriggered(
+                SurvivalDecisions.FEARLESS_FLOAT_DELAY_TICKS + 1, false));
+        assertFalse(SurvivalDecisions.floatInstinctTriggered(
+                SurvivalDecisions.FEARLESS_FLOAT_DELAY_TICKS, false));
     }
 }
