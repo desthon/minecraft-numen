@@ -78,20 +78,34 @@ class WaterWalkCostTest {
                 "1 级就该看得见提速");
     }
 
-    /** 深水(脚下一格也是水,人浮着):原版附魔减半——0 级仍是水价,3 级只剩两档中点。 */
+    /**
+     * 深水(脚下一格也是水,人浮着):<b>基准换档</b>——泳道只有疾跑泳姿能待
+     * (泳姿准入就是 {@code isSprinting()}),原版水阻随之从 0.8 升到 0.9,
+     * 基准速度 2.2 → 4 格/s({@link ActionCosts.SWIM_ONE_BLOCK_COST});附魔照旧减半。
+     *
+     * <p>也就是说:0 级浮着(5.0)比 0 级踩底(9.091)便宜 —— 不是"水便宜了",
+     * 是这两档本来就不是同一种移动(踩底走 2.2 格/s,游泳 4 格/s)。附魔减半之后
+     * 3 级浮着(≈4.82)仍然略贵于 3 级踩底(=陆价 4.633)。
+     */
     @Test
-    void floatingWaterHalvesTheEnchant() {
-        assertEquals(WALK_ONE_IN_WATER_COST, CalculationContext.WaterCost.cost(0, FLOAT), EPS,
-                "浮着的人 0 级还是水价");
-        assertEquals((WALK_ONE_IN_WATER_COST + WALK_ONE_BLOCK_COST) / 2,
+    void floatingWaterSwimsAtTheSprintTierAndHalvesTheEnchant() {
+        assertEquals(ActionCosts.SWIM_ONE_BLOCK_COST, CalculationContext.WaterCost.cost(0, FLOAT), EPS,
+                "浮着的人 0 级按泳姿档(疾跑水阻 f = 0.9 → 4 格/s)");
+        assertEquals(5.0, ActionCosts.SWIM_ONE_BLOCK_COST, EPS, "泳姿档 = 20/4.0");
+        assertEquals((ActionCosts.SWIM_ONE_BLOCK_COST + WALK_ONE_BLOCK_COST) / 2,
                 CalculationContext.WaterCost.cost(3, FLOAT), EPS,
-                "3 级浮着 = 半数附魔 = 两档中点");
-        for (int level = 1; level <= 3; level++) {
+                "3 级浮着 = 半数附魔 = 泳姿档与陆价的中点");
+        for (int level = 0; level <= 2; level++) {
             assertTrue(CalculationContext.WaterCost.cost(level, FLOAT)
-                            > CalculationContext.WaterCost.cost(level, WADE),
-                    level + " 级浮着该比踩底贵(附魔减半)");
+                            < CalculationContext.WaterCost.cost(level, WADE),
+                    level + " 级浮着(游泳)该比踩底涉水便宜 —— 两档不是同一种移动");
         }
-        assertTrue(CalculationContext.WaterCost.cost(1, FLOAT) < WALK_ONE_IN_WATER_COST,
+        assertTrue(CalculationContext.WaterCost.cost(3, FLOAT) > WALK_ONE_BLOCK_COST,
+                "附魔减半之后,浮着那档仍然略贵于陆价");
+        assertTrue(CalculationContext.WaterCost.cost(3, FLOAT)
+                        > CalculationContext.WaterCost.cost(3, WADE),
+                "3 级是两档的唯一交叉点:踩底吃满附魔(=陆价 4.633),浮着只吃一半(≈4.82)");
+        assertTrue(CalculationContext.WaterCost.cost(1, FLOAT) < ActionCosts.SWIM_ONE_BLOCK_COST,
                 "浮在水柱里也不是不给附魔");
     }
 

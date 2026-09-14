@@ -10,8 +10,22 @@ public final class ActionCosts {
 
     /** 平走一格(4.317 格/s)。 */
     public static final double WALK_ONE_BLOCK_COST = 20 / 4.317; // 4.633
-    /** 水中走一格(2.2 格/s)。 */
+    /** 水中走一格(2.2 格/s):水里<b>没疾跑</b>那一档,原版水阻 {@code f = 0.8}。 */
     public static final double WALK_ONE_IN_WATER_COST = 20 / 2.2; // 9.091
+
+    /**
+     * 泳姿横渡一格(4 格/s = 0.2 格/tick):水里<b>疾跑</b>那一档的终端速度。
+     *
+     * <p>原版事实(1.20.1 {@code LivingEntity.travel} 水分支,official 映射反汇编核对):
+     * 水平阻力 {@code f = isSprinting() ? 0.9f : getWaterSlowDown()}(玩家 0.8)、
+     * 每 tick 加速度 {@code g = 0.02};终端水平速度 {@code v = g / (1 - f)} —— 与
+     * {@link #WALK_ONE_IN_WATER_COST} 那颗 2.2 格/s ↔ {@code f = 0.8} 同一个约定。
+     * 深水里<b>只有疾跑泳姿能移动</b>(泳姿准入就是 {@code isSprinting()},见
+     * {@code Movement#waterDrive}),所以泳道那一档不能用不疾跑的水速计价:
+     * 旧口径把 9.091 也套在泳道上,深水横渡于是贵成绕岸的两倍(见
+     * {@code WaterShortcutCostTest} 的实测表)。
+     */
+    public static final double SWIM_ONE_BLOCK_COST = 20 / 4.0; // 5.0
     /** 灵魂沙上走一格(约半速)。 */
     public static final double WALK_ONE_OVER_SOUL_SAND_COST = WALK_ONE_BLOCK_COST * 2; // 9.266
     /** 上梯子一格(2.35 格/s)。 */

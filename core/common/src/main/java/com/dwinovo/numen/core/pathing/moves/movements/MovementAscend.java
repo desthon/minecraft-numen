@@ -60,7 +60,12 @@ public class MovementAscend extends Movement {
                             context.view, context.loadedTest, destX, y, destZ)) {
                 return COST_INF;
             }
-            return FlowCost.fallingWaterCost(context.waterWalkSpeed, 1, context.waterDepthStrider);
+            // 档位与平走/对角同一把尺(踩底 = 涉水档、浮着 = 泳姿档,见 waterTierCost):
+            // 水柱里同样是"浮着游泳",不能一边按泳姿档收平走的钱、一边按涉水档收上爬的钱
+            // (入参是<b>落点的身位格</b> y+1:上爬一格之后人待在那一层)
+            return FlowCost.fallingWaterCost(
+                    MovementHelper.waterTierCost(context, context.waterWalkSpeed, destX, y + 1, destZ),
+                    1, context.waterDepthStrider);
         }
         double additionalPlacementCost = 0;
         if (!MovementHelper.canWalkOn(context, destX, y, destZ, toPlace)) {

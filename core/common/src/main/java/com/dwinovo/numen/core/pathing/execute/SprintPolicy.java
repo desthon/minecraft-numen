@@ -33,6 +33,11 @@ import java.util.function.Supplier;
  * 统一施加;这里只读世界、只算结论。唯一的例外是
  * {@link MovementDescend#forceSafeMode}——那是下降原语自己的安全档位,
  * 属于移动的属性而非执行器的状态。
+ *
+ * <p><b>水体例外</b>:身体泡在液体里时这一整套前后文启发不适用 —— 水里既没有
+ * "直跳上台"也没有"压舵前越",而疾跑在这里是泳姿的开关(见
+ * {@link Movement#sprintRequest})。那种 tick 的结论由水的处置直接给出
+ * ({@link #waterVerdict}),本类只负责译成 {@link Decision}。
  */
 final class SprintPolicy {
 
@@ -69,14 +74,22 @@ final class SprintPolicy {
 
     /**
      * 裁决这一 tick 的疾跑。{@code requested} 是移动原语被没收前请求的
-     * SPRINT 键(没收动作在执行器,这里只收结论)。
+     * SPRINT 键(没收动作在执行器,这里只收结论);{@code waterSprint} 是
+     * {@link Movement#waterSprintVerdict()} 给的水里权威结论(null = 陆地)。
      */
-    Decision decide(int pathPosition, boolean requested) {
+    Decision decide(int pathPosition, boolean requested, Boolean waterSprint) {
         // 与成本模型同判据:允许疾跑且饥饿值足够
         if (!(NavSettings.get().allowSprint
                 && (!WorkProfile.of(player).hasHunger()
                         || player.getFoodData().getFoodLevel() > 6))) {
             return Decision.NO;
+        }
+        // 水里:水自己说了算(见 Movement#waterDrive / Movement#sprintRequest)。
+        // 陆地的跳步/压舵/直跳上台那一套在这里一律不跑 —— 水里没有"直跳上台",
+        // JUMP 是划水上浮(归 Movement 的连续上浮规则),压舵更是把泳姿压没。
+        Decision water = waterVerdict(waterSprint);
+        if (water != null) {
+            return water;
         }
         Movement current = path.movements().get(pathPosition);
 
@@ -177,6 +190,17 @@ final class SprintPolicy {
             }
         }
         return Decision.NO;
+    }
+
+    /**
+     * 水里这一 tick 的权威裁决(纯逻辑,可测):drive 说保持 → YES,说收 → NO,
+     * null = 陆地(交回下面的前后文逻辑)。水里不做任何跳步/压舵/直跳把戏。
+     */
+    static Decision waterVerdict(Boolean waterSprint) {
+        if (waterSprint == null) {
+            return null;
+        }
+        return waterSprint ? Decision.YES : Decision.NO;
     }
 
     /**

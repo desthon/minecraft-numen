@@ -1207,6 +1207,11 @@ public final class MovementHelper {
      * 却一直按涉水档收钱 —— 有深海探索者时这就是"深水里按踩底的速度定价",再叠上
      * 泳道里 {@code isWater(pb0)} 为真而把疾跑折扣关掉,泳道就比湖底(脚在干格上、
      * 吃到疾跑折扣)还贵,规划器于是把深水横渡整条压在湖底当陆地走。
+     *
+     * <p><b>现象 2 又补了一刀</b>:泳道这一档原先连速度基准也拿错 —— 它和不疾跑的
+     * 涉水档共用 2.2 格/s 那颗常量,而深水里只有泳姿能移动(泳姿准入就是
+     * {@code isSprinting()},原版水阻随之从 0.8 降到 0.9)。现在泳道档的基准是
+     * {@link ActionCosts#SWIM_ONE_BLOCK_COST}(4 格/s),涉水档原样不动。
      */
     public static double waterTierCost(CalculationContext context, double baseWaterCost,
                                        int destX, int destY, int destZ) {

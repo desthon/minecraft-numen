@@ -341,10 +341,12 @@ class WaterCrossingCostTest {
         FakeView v = channel(3, false);
         CalculationContext ctx = context(v);
         assertEquals(ActionCosts.WALK_ONE_IN_WATER_COST, ctx.waterWalkSpeed, 1e-9,
-                "0 级深海探索者的水价该是 20/2.2 = 9.091,不是走路价 4.633");
+                "0 级深海探索者的涉水档该是 20/2.2 = 9.091,不是走路价 4.633");
+        // x=1 那一格脚下一格也是水 → 浮着 = 泳姿档(疾跑水阻 f = 0.9,20/4 = 5.0);
+        // 那一档必须仍贵于陆价(水不是陆地),但不再套不疾跑的水速。
         double inWater = Moves.TRAVERSE_EAST.cost(ctx, 1, TOP_WATER, 0);
-        assertTrue(inWater >= ActionCosts.WALK_ONE_IN_WATER_COST - 1e-9,
-                "深水横渡不该便宜过水价,实为 " + inWater);
+        assertTrue(inWater >= ActionCosts.SWIM_ONE_BLOCK_COST - 1e-9,
+                "深水泳道不该便宜过泳姿档,实为 " + inWater);
         assertTrue(inWater > ActionCosts.WALK_ONE_BLOCK_COST,
                 "深水横渡必须贵于走路价(水不是陆地),实为 " + inWater);
     }
@@ -589,11 +591,11 @@ class WaterCrossingCostTest {
                 "踩得到底 → 涉水档");
         assertEquals(floatingTier, MovementHelper.waterTierCost(ctx, wadingTier, 1, lane, 0), 1e-9,
                 "浮着 → 浮着档(0 级附魔两档同价,3 级时浮着只剩一半附魔)");
-        // 这一档在附魔身上才看得见:3 级踩底 = 陆价(4.633),3 级浮着只剩一半附魔(6.86)。
+        // 这一档在附魔身上才看得见:3 级踩底 = 陆价(4.633),3 级浮着只剩一半附魔(4.82)。
         // 深水泳道一直按涉水档收钱,就等于把有附魔的人按"踩底"计价。
         assertEquals(ActionCosts.WALK_ONE_BLOCK_COST,
                 CalculationContext.WaterCost.cost(3, CalculationContext.WaterCost.WADING_DEPTH), 1e-9);
-        assertEquals(6.862,
+        assertEquals(4.816,
                 CalculationContext.WaterCost.cost(3, CalculationContext.WaterCost.FLOATING_DEPTH), 1e-3);
     }
 
@@ -672,12 +674,14 @@ class WaterCrossingCostTest {
 
         double up = MovementAscend.cost(ctx, 1, 62, 0, 2, 0);    // 逆着水柱往上爬一格(y 62→63)
         double across = Moves.TRAVERSE_EAST.cost(ctx, 2, 63, 0);  // 水柱里横渡(同层)
+        // 水柱里也是浮着游泳:档位与平走/对角同一把尺(见 MovementAscend 的水柱分支)
+        double waterBase = MovementHelper.waterTierCost(ctx, ctx.waterWalkSpeed, 3, 63, 0);
         assertTrue(up < COST_INF && across < COST_INF, "两档都该能规划:up=" + up + " across=" + across);
         assertTrue(across < up, "逆着水柱往上该贵于横渡:" + across + " vs " + up);
-        assertTrue(FlowCost.fallingWaterCost(ctx.waterWalkSpeed, -1, ctx.waterDepthStrider) < across,
+        assertTrue(FlowCost.fallingWaterCost(waterBase, -1, ctx.waterDepthStrider) < across,
                 "顺着水柱往下该便宜于横渡(纯模型那一档;落一格在动作层还要算下落本身)");
-        assertEquals(FlowCost.fallingWaterCost(ctx.waterWalkSpeed, 1, ctx.waterDepthStrider), up, 1e-9,
-                "向上就是水柱那一档(水价 + 上浮那几 tick)");
+        assertEquals(FlowCost.fallingWaterCost(waterBase, 1, ctx.waterDepthStrider), up, 1e-9,
+                "向上就是水柱那一档(泳姿档 + 上浮那几 tick)");
     }
 
     /** 爬上去那一步(上升原语)也按水柱价:能规划,不会因为落点不可站而去垫方块。 */
@@ -687,7 +691,8 @@ class WaterCrossingCostTest {
         CalculationContext ctx = context(v);
         double climb = MovementAscend.cost(ctx, 1, 62, 0, 2, 0);
         assertTrue(climb < COST_INF, "逆着水柱往上爬一格应可规划,实为 " + climb);
-        assertEquals(FlowCost.fallingWaterCost(ctx.waterWalkSpeed, 1, ctx.waterDepthStrider), climb, 1e-9);
+        double waterBase = MovementHelper.waterTierCost(ctx, ctx.waterWalkSpeed, 3, 63, 0);
+        assertEquals(FlowCost.fallingWaterCost(waterBase, 1, ctx.waterDepthStrider), climb, 1e-9);
     }
 
     /**

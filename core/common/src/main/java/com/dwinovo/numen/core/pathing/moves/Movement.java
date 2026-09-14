@@ -5,10 +5,12 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
+import com.dwinovo.numen.core.Constants;
 import com.dwinovo.numen.core.pathing.settings.NavSettings;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.SlabBlock;
@@ -41,6 +43,12 @@ public abstract class Movement {
     protected final BlockPos positionToPlace;
 
     private MovementState currentState = new MovementState().setStatus(MovementStatus.PREPPING);
+
+    /** 上一 tick 液体里的处置结论;不在液体里为 null(见 {@link #waterDrive})。 */
+    private WaterDrive lastWaterDrive;
+
+    /** 上一次留声时的疾跑结论(只在翻转时打一行 [numen-swim])。 */
+    private Boolean lastLoggedSprint;
 
     /** 缓存成本;override 机制允许外部钉入更严的估价。 */
     private Double cost;
@@ -199,8 +207,9 @@ public abstract class Movement {
 
     /**
      * 每 tick 推进一次。通用框架:强制关闭飞行能力(走地面物理)→
-     * 子类状态机 → 水里按 {@link #waterDrive} 处置(按跳上浮 / 收疾跑下潜 /
-     * 轻俯角压住泳道)→ 卡墙时先换上对该方块最优工具再按左键 →
+     * 子类状态机 → 水里按 {@link #waterDrive} 处置(<b>疾跑的收与放是权威</b>、
+     * 按跳上浮、轻俯角压住泳道;翻转时留一行 {@code [numen-swim]} 存证)→
+     * 卡墙时先换上对该方块最优工具再按左键 →
      * 视角与按键交执行层钩子,按键先清后设、终态清空。
      */
     public MovementStatus update() {
@@ -214,13 +223,29 @@ public abstract class Movement {
         // 水有没有没到身体:脚上面那格还是液体。浅水里它是假 —— 那条路叫涉水。
         boolean liquidAboveFeet = MovementHelper.isLiquid(player.level().getBlockState(feet.above()));
         WaterDrive drive = waterDrive(inLiquid, player.isSwimming(), player.onGround(),
-                liquidAboveFeet, player.getY(), dest.getY());
+                liquidAboveFeet, player.getY(), dest.getY(),
+                player.isEyeInFluid(FluidTags.WATER));
+        lastWaterDrive = inLiquid ? drive : null;
         if (drive.strokeUp()) {
             currentState.setInput(Input.JUMP, true);
         }
-        if (!drive.sprint()) {
-            // 收疾跑:身体还没没入水面时先沉下去(实机"在水面上走"的正因,见 waterDrive)
-            currentState.setInput(Input.SPRINT, false);
+        if (inLiquid) {
+            // 水的处置是权威(见 waterDrive):说收就收(入姿那一段要沉下去)、说保持就保持。
+            // 旧口径只在这里"收"、不在这里"给"——Descend/Ascend 这类原语从不请求疾跑,
+            // 于是执行器的 SprintPolicy 兜底 NO,泳姿一进就掉,只能在水面上下反复。
+            boolean sprint = sprintRequest(true, drive, NavSettings.get().sprintInWater, false);
+            currentState.setInput(Input.SPRINT, sprint);
+            if (lastLoggedSprint == null || lastLoggedSprint != sprint) {
+                // 只在这一票翻转时留声:实机上"泳姿一进就掉"只有这条线能一眼看出来
+                // (泳姿的维持全靠疾跑,而疾跑是执行器直接写实体状态的)。
+                Constants.LOG.debug("[numen-swim] 疾跑{} 泳道={} 身位={} 泳姿={} 眼在水里={} 划水={} 下潜={}",
+                        sprint ? "保持" : "收", dest.getY(), String.format("%.2f", player.getY()),
+                        player.isSwimming(), player.isEyeInFluid(FluidTags.WATER),
+                        drive.strokeUp(), drive.dive());
+            }
+            lastLoggedSprint = sprint;
+        } else {
+            lastLoggedSprint = null; // 离开水面:下次入水第一 tick 再留一行声
         }
         if (drive.dive()) {
             MovementState.MovementTarget aim = currentState.getTarget();
@@ -309,14 +334,19 @@ public abstract class Movement {
      *       正好落在水面上方那一格空气里,按格问必然为假);"低于泳道底面才划" ——
      *       已经到泳道层还继续划就是跟重力对拉,而且站在水下地面上会一路蹦
      *       (浅水涉水因此单独排除)。</li>
-     *   <li><b>收疾跑</b>:这是"下潜不下去"的正因。原版
-     *       {@code LivingEntity.getFluidFallingAdjustedMovement} 一看到
-     *       {@code isSprinting()} 就直接把运动矢量原样返回 —— <b>水里疾跑等于关掉重力</b>;
-     *       再叠上执行侧的划水,身体就钉在液面那一层上下不去。而泳姿的<b>准入</b>又要求
-     *       疾跑({@code updateSwimming}:{@code isSprinting() && isUnderWater()}),
-     *       所以顺序只能是:先松开疾跑让重力把人压到水面之下,眼睛一进水再把疾跑挂回去
-     *       —— 那正是 {@link #SWIM_ENTRY_BAND} 的位置。深水里踩得到底、浅水涉水都在带内,
-     *       照旧疾跑。</li>
+     *   <li><b>疾跑的收与放(水的权威)</b>:收疾跑是"下潜不下去"的正因 ——
+     *       原版 {@code LivingEntity.getFluidFallingAdjustedMovement} 一看到
+     *       {@code isSprinting()} 就直接把运动矢量原样返回,<b>水里疾跑等于关掉重力</b>。
+     *       而泳姿的<b>准入</b>又要求疾跑({@code updateSwimming}:
+     *       {@code isSprinting() && isUnderWater()}),所以顺序只能是:先松开疾跑让重力
+     *       把人压到水面之下,眼睛一进水再把疾跑挂回去 —— 那正是
+     *       {@link #SWIM_ENTRY_BAND} 的位置。深水里踩得到底、浅水涉水都在带内,照旧疾跑。
+     *       <b>而"挂回去"必须由这里发话</b>:泳姿维持只要
+     *       {@code isSprinting() && isInWater()},可 {@link MovementDescend}/
+     *       {@link MovementAscend} 从不请求疾跑,执行器的兜底就是收 —— 泳姿因此
+     *       一进就掉(实机"很短暂的泳姿,又立马切回来")。于是水里这一票改成权威:
+     *       由 {@link #sprintRequest} 落到 SPRINT 键上,子类的请求在水里不再算数。
+     *       已经在泳姿里时疾跑恒保持(哪怕浮头浮到泳道之上),否则泳姿当刻掉。</li>
      *   <li><b>低头下潜</b>:只在<b>已经在泳姿里</b>且高于停留带时用 —— 泳姿分支的竖直
      *       耦合只对 {@code isSwimming()} 生效,没进泳姿时低头什么也改不了(所以不能拿它
      *       当入水手段)。</li>
@@ -331,6 +361,26 @@ public abstract class Movement {
      */
     public static WaterDrive waterDrive(boolean inLiquid, boolean swimming, boolean onGround,
                                         boolean liquidAboveFeet, double playerY, int destY) {
+        // 不给"眼睛在水里"这一票(纯几何调用方):停留带自己已经把眼睛进水那一段盖住了
+        return waterDrive(inLiquid, swimming, onGround, liquidAboveFeet, playerY, destY, false);
+    }
+
+    /**
+     * {@link #waterDrive(boolean, boolean, boolean, boolean, double, int)} 的全量版:
+     * 多一个原版实测信号 {@code isEyeInFluid(WATER)}。
+     *
+     * <p><b>为什么还要这一票</b>:泳姿的准入是 {@code isSprinting() && isUnderWater()},
+     * 而 {@code isUnderWater()} 用的是<b>上一 tick</b>的眼睛位置;换气反射
+     * (BreathChain 的 {@code InputDriver.halt})会把疾跑置假、泳姿当刻掉,而身体此时
+     * 已经浮到泳道之上 —— 只看停留带的话要再沉 0.13 格才把疾跑挂回去,泳姿断一拍。
+     * 眼睛已经在水里就是"这一位此刻就该是泳姿"的确证,把它并进判据,浮头之后
+     * 下一 tick 就把疾跑与泳姿一起捡回来,而不是等身体重新沉下去。
+     *
+     * @param eyeInWater 原版 {@code Entity.isEyeInFluid(WATER)}:这一 tick 眼睛是否泡在水里
+     */
+    public static WaterDrive waterDrive(boolean inLiquid, boolean swimming, boolean onGround,
+                                        boolean liquidAboveFeet, double playerY, int destY,
+                                        boolean eyeInWater) {
         if (!inLiquid) {
             return WaterDrive.DRY; // 陆地:一律不干预,子类自己的按键与疾跑请求照旧
         }
@@ -341,8 +391,31 @@ public abstract class Movement {
         // 把余速磨掉,一直挂在泳道格上沿甚至漂出去);没进泳姿:低头没用,
         // 只能靠收疾跑把重力请回来
         boolean dive = swimming && playerY > destY + DIVE_TRIGGER;
-        boolean sprint = swimming || !aboveEntryBand;
+        boolean sprint = swimming || eyeInWater || !aboveEntryBand;
         return new WaterDrive(strokeUp, dive, sprint);
+    }
+
+    /**
+     * 水里这一 tick 的疾跑请求(纯判据,可测)。<b>水的处置是权威</b>:
+     * 在液体里,子类那一票(SPRINT 键请求)不算数 —— {@code drive} 说保持就请求、
+     * 说收就撤;不在液体里则原样返回子类的请求,陆地行为一个字不改。
+     *
+     * <p>为什么必须让子类在这里失声:{@link MovementDescend}/{@link MovementAscend}
+     * 这类原语<b>从不</b>请求疾跑(它们不知道前后文),执行器侧的
+     * {@code SprintPolicy.decide} 对"没请求"的兜底是 NO —— 而原版
+     * {@code updateSwimming} 维持泳姿只要 {@code isSprinting() && isInWater()},
+     * 疾跑一收泳姿当刻掉。于是"水里疾跑"只能由水自己裁决。
+     *
+     * @param inLiquid          身体泡在液体里(与 {@link #waterDrive} 同一判据)
+     * @param sprintInWater     既有闸门 {@link NavSettings#sprintInWater}(关掉 = 水里不疾跑)
+     * @param subclassRequested 子类原本想按的 SPRINT 键(陆地直接透传)
+     */
+    public static boolean sprintRequest(boolean inLiquid, WaterDrive drive, boolean sprintInWater,
+                                        boolean subclassRequested) {
+        if (!inLiquid) {
+            return subclassRequested;
+        }
+        return drive.sprint() && sprintInWater;
     }
 
     /** {@link #waterDrive} 的三条结论:按跳上浮 / 低头下潜 / 保留疾跑。 */
@@ -412,6 +485,19 @@ public abstract class Movement {
     /** 重置状态机(路径回退重执行时用)。 */
     public void reset() {
         currentState = new MovementState().setStatus(MovementStatus.PREPPING);
+        lastWaterDrive = null;
+        lastLoggedSprint = null;
+    }
+
+    /**
+     * 水里疾跑的最终裁决(null = 不在液体里,交回陆地的前后文逻辑)。执行器拿它当
+     * {@link com.dwinovo.numen.core.pathing.execute.SprintPolicy} 的权威输入:水里不做
+     * 跳步/压舵那一套陆地动作,drive 说保持就是 YES、说收就是 NO。
+     */
+    public Boolean waterSprintVerdict() {
+        return lastWaterDrive == null
+                ? null
+                : lastWaterDrive.sprint() && NavSettings.get().sprintInWater;
     }
 
     // ==================== 执行层钩子(经注入代理落地) ====================

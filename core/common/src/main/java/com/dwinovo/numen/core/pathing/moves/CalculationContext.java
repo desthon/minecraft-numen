@@ -78,7 +78,9 @@ public class CalculationContext {
     public int maxFallHeightNoWater;
     public final int maxFallHeightBucket;
     public final double fallDamageCostPerPoint;
-    /** 水中行走单格成本:无附魔 = 水价 20/2.2,深海探索者每级折向平走价,见 {@link WaterCost#cost}。 */
+    /** <b>涉水档</b>单格成本(踩得到底):无附魔 = 20/2.2,深海探索者每级折向平走价。
+     *  深水泳道(浮着)是另一颗基准 {@link ActionCosts#SWIM_ONE_BLOCK_COST},
+     *  由 {@link MovementHelper#waterTierCost} 按实际身位现选,见 {@link WaterCost#cost}。 */
     public final double waterWalkSpeed;
     /**
      * 深海探索者等级快照(0..3)。与 {@link #waterWalkSpeed} 取同一档(涉水档),
@@ -261,8 +263,9 @@ public class CalculationContext {
 
     // 水价快照(waterDepthStrider / waterWalkSpeed)在构造器里一次取定,见那两个字段:
     // 一次搜索一把尺。这里取的是<b>涉水档</b>(附魔全额那一档):「没附魔」错用的陆价
-    // (4.633)由此纠正回水价(20/2.2 = 9.091)。浮着(原版离地附魔减半)那一档由
-    // MovementHelper.waterTierCost 按每格的实际身位现选 —— 深水泳道不能一直按涉水档收钱。
+    // (4.633)由此纠正回水价(20/2.2 = 9.091)。浮着那一档速度不同(水里疾跑 f = 0.9,
+    // 基准 SWIM_ONE_BLOCK_COST = 20/4.0,附魔减半)且由 MovementHelper.waterTierCost
+    // 按每格的实际身位现选 —— 深水泳道不能一直按涉水档收钱,也不能按不疾跑的水速收钱。
 
     /**
      * 水中每格成本的水深 / 深海探索者模型:纯函数,不碰玩家、世界与设置。
@@ -275,11 +278,22 @@ public class CalculationContext {
      * {@code h > 0} 时 {@code f += (0.54600006 - f) * h / 3}、
      * {@code g += (getSpeed() - g) * h / 3}(玩家 {@code getSpeed() = 0.1},
      * 正是走路那一档加速度)。也就是说:踩底涉水时 3 级附魔把水速顶到走路速度,
-     * 0 级只剩水速(约 2.2 格/s);浮在水柱里时附魔只算一半。
+     * 0 级只剩水速(约 2.2 格/s);浮在水柱里时附魔只算一半。<b>而疾跑那一档
+     * ({@code f = 0.9})是另一颗基准</b>:终端速度 {@code 0.02 / (1 - 0.9) = 0.2}
+     * 格/tick = 4 格/s —— 深水泳道只有泳姿能待,泳姿准入就是 {@code isSprinting()},
+     * 所以那一档必须按这颗基准算。
      *
-     * <p>于是成本沿用原本那条曲线,在 {@link ActionCosts#WALK_ONE_IN_WATER_COST}
-     * (2.2 格/s)与 {@link ActionCosts#WALK_ONE_BLOCK_COST}(4.317 格/s)之间按
-     * {@code h / 3} 插值——只把「没附魔」从走路价挪回水价。
+     * <p>于是成本沿用原本那条曲线,按档位在两颗基准之间插值:
+     * <ul>
+     *   <li><b>涉水档</b>(踩得到底)在 {@link ActionCosts#WALK_ONE_IN_WATER_COST}
+     *       (2.2 格/s)与 {@link ActionCosts#WALK_ONE_BLOCK_COST}(4.317 格/s)之间按
+     *       {@code h / 3} 插值——只把「没附魔」从走路价挪回水价;</li>
+     *   <li><b>浮着档</b>(泳道:脚下一格也是水)在
+     *       {@link ActionCosts#SWIM_ONE_BLOCK_COST}(4 格/s,水里疾跑 {@code f = 0.9}
+     *       那一档)与陆价之间按 {@code h * 0.5 / 3} 插值。原先它和不疾跑的涉水档共用
+     *       2.2 格/s 那颗基准,等于把"深水里只能靠泳姿移动"这段加成算没了 ——
+     *       直穿水域因此永远比绕岸贵(见 {@code WaterShortcutCostTest})。</li>
+     * </ul>
      *
      * <p>为什么放在静态嵌套类里而不是外层:外层有 {@code STACK_BUCKET_WATER}
      * 这种静态初始化就构造物品的字段,碰外层类得先引导 MC 注册表;嵌套类自己
@@ -312,10 +326,14 @@ public class CalculationContext {
                 return ActionCosts.WALK_ONE_BLOCK_COST; // 没有水,就是陆价
             }
             int level = Math.max(0, Math.min(MAX_DEPTH_STRIDER, depthStriderLevel));
+            boolean floating = waterDepth >= FLOATING_DEPTH;
             // 原版在水里离地时 h *= 0.5:浮着的人只吃一半附魔
-            double effective = waterDepth >= FLOATING_DEPTH ? level * 0.5 : level;
+            double effective = floating ? level * 0.5 : level;
             double landShare = effective / MAX_DEPTH_STRIDER;
-            return ActionCosts.WALK_ONE_IN_WATER_COST * (1 - landShare)
+            // 基准速度随档位变:浮着 = 泳姿(疾跑,f = 0.9);踩得到底 = 不疾跑那一档(f = 0.8)
+            double base = floating ? ActionCosts.SWIM_ONE_BLOCK_COST
+                    : ActionCosts.WALK_ONE_IN_WATER_COST;
+            return base * (1 - landShare)
                     + ActionCosts.WALK_ONE_BLOCK_COST * landShare;
         }
     }

@@ -115,6 +115,21 @@ class MovementBuoyancyTest {
         assertTrue(d.sprint(), "浅水涉水照旧可以疾跑");
     }
 
+    /**
+     * 眼睛已经在水里(原版 {@code isEyeInFluid(WATER)}):哪怕身体还浮在停留带之上、
+     * 泳姿这会儿是掉的(换气反射把疾跑置假就会这样),疾跑也要挂回去 —— 下一 tick
+     * 原版 {@code updateSwimming} 的准入就成立,泳姿自己捡回来。
+     */
+    @Test
+    void eyeInWaterKeepsTheSprintAboveTheEntryBand() {
+        for (double y : new double[] {LANE + 0.3, LANE + 0.5, LANE + 1.0}) {
+            WaterDrive d = Movement.waterDrive(true, false, false, true, y, LANE, true);
+            assertTrue(d.sprint(), "身位 " + y + "、眼睛在水里 → 这一位该是泳姿,疾跑别收");
+            assertFalse(Movement.waterDrive(true, false, false, true, y, LANE, false).sprint(),
+                    "对照:眼睛不在水里(同样的身位)就得收疾跑,让重力把人压下去");
+        }
+    }
+
     /** 不在液体里:一次都不干预(陆地上由移动原语自己决定要不要起跳与疾跑)。 */
     @Test
     void dryBodyIsLeftAlone() {

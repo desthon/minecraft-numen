@@ -332,7 +332,9 @@ public final class PathExecutor {
             // 不靠按键),把请求作为事实交给策略;裁决的全部副作用在此统一施加。
             boolean sprintRequested = harness.isKeyRequested(Input.SPRINT);
             harness.forceKey(Input.SPRINT, false);
-            SprintPolicy.Decision d = sprint.decide(pathPosition, sprintRequested);
+            // 水里那一票是权威(Movement#waterSprintVerdict):null = 陆地,走原前后文逻辑
+            SprintPolicy.Decision d = sprint.decide(pathPosition, sprintRequested,
+                    movement.waterSprintVerdict());
             if (d.skipTo() >= 0) {
                 pathPosition = d.skipTo();
                 onChangeInPathPosition();
