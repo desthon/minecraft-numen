@@ -1,0 +1,28 @@
+plugins {
+    id 'numen-plugin'
+    id 'org.spongepowered.gradle.vanilla' version '0.2.1-SNAPSHOT'
+}
+
+// 只写原版 MC 与 numen api,三个加载器都能跑:编译对着原版(VanillaGradle,与 api/common
+// 同一条路),加载器的类物理上不在类路径上,想用也编译不过。
+minecraft { version(minecraft_version) }
+
+dependencies {
+    // 瘦 api jar 取跨加载器那份:与本模块一样只有原版 MC 的类型
+    compileOnly files(project(':api:common').tasks.named('apiJar'))
+
+    // 单测:判据全是纯函数(哪些方块算一脉 / 目标模组在不在 / 激活状态怎么摆),
+    // 不碰 MC 世界、不碰目标模组,所以它们能在没有游戏环境的地方跑。
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') { useJUnitPlatform() }
+
+// 编译期类路径上<b>没有</b> FTB Ultimine,也没有 Vein Mining:联动一个类都不引用它们,
+// 全走反射(见 ChainMineBridge 的类注释)。所以这里既没有它们的 maven 坐标,也不需要
+// 它们的仓库——它们只有 Forge 版,而本模块要在三个加载器上跑。
+//
+// 目标模组不在时这个模块一个类都不会被加载,见各加载器 core 的 Builtin 那道闸
+// (两个模组各一闸,谁在场谁开;两个都在时 NumenChainmine.install 自己只装一次)。

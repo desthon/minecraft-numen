@@ -187,6 +187,37 @@ public interface NavGoal {
     }
 
     /**
+     * {@link #mineStance} 的成员判据,<b>纯坐标、不碰世界</b>——任务层按同一把尺回答
+     * "脚下这一格是不是某颗矿的站位"(见 {@code MineCompanionTask.stanceOreAt})。
+     *
+     * <p>抽出来是因为两处必须永远同尺:导航拿它宣布"已到位",挖掘层拿它决定"从这
+     * 一格下手"。任务里另写一份公式,改动时必然只改到一处,于是又变成
+     * "导航说到位、挖掘说够不着"的死循环。
+     */
+    static boolean mineStanceAt(BlockPos ore, BlockPos feet) {
+        int dy = feet.getY() - ore.getY();
+        if (dy > 0) {
+            return false;   // 踩在它头上:那是自己的地板
+        }
+        int dx = Math.abs(feet.getX() - ore.getX());
+        int dz = Math.abs(feet.getZ() - ore.getZ());
+        // 两格高的身体:脚在下方时头那格也算贴着,所以负的 dy 折一格
+        int bodyDy = dy + 1 <= 0 ? dy + 1 : 0;
+        return dx + dz + Math.abs(bodyDy) <= 1;
+    }
+
+    /**
+     * {@link #near} 的成员判据,<b>纯坐标</b>:整数格的三维球。
+     *
+     * <p>{@code GoalCompiler.mineField} 用它把"身体已经站在跟前"的掉落物成员挡在目标
+     * 之外——起点就成立的成员指挥不动搜索,只会让复合目标凭空宣布到达。任务层不许
+     * 另写一份距离公式,理由同 {@link #mineStanceAt}。
+     */
+    static boolean withinNear(BlockPos center, double radius, BlockPos feet) {
+        return feet.distSqr(center) <= radius * radius;
+    }
+
+    /**
      * Any of several goals. Satisfied by reaching
      * ANY member; the heuristic is the minimum over members, so a single A* search
      * naturally heads for the CLOSEST reachable one. This is how mining targets a
@@ -346,7 +377,7 @@ public interface NavGoal {
         }
 
         @Override public boolean isAt(BlockPos feet) {
-            return feet.distSqr(goal) <= radiusSqr;
+            return withinNear(goal, radius, feet);
         }
 
         @Override public double heuristic(BlockPos from) {
@@ -464,15 +495,7 @@ public interface NavGoal {
         }
 
         @Override public boolean isAt(BlockPos feet) {
-            int dy = feet.getY() - ore.getY();
-            if (dy > 0) {
-                return false;   // 踩在它头上:那是自己的地板
-            }
-            int dx = Math.abs(feet.getX() - ore.getX());
-            int dz = Math.abs(feet.getZ() - ore.getZ());
-            // 两格高的身体:脚在下方时头那格也算贴着,所以负的 dy 折一格
-            int bodyDy = dy + 1 <= 0 ? dy + 1 : 0;
-            return dx + dz + Math.abs(bodyDy) <= 1;
+            return mineStanceAt(ore, feet);
         }
 
         @Override public double heuristic(BlockPos from) {

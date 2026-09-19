@@ -3,6 +3,7 @@ package com.dwinovo.numen.core.pathing.calc;
 import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -87,5 +88,46 @@ class NavGoalMembershipTest {
         NavGoal exact = NavGoal.mineColumn(T, 0);
         assertTrue(exact.isAt(T), "exact stance: feet at the ore");
         assertFalse(exact.isAt(T.below()), "exact stance: one below rejected");
+    }
+
+    /**
+     * 同尺钉:导航宣布"到位"用的成员判据,与任务层回答"脚下这一格是不是某颗矿的
+     * 站位"用的必须是同一条。两处各写一份公式的话,改动时必然只改到一处,于是又
+     * 回到"导航说到位、挖掘说够不着、重规划还是那一格"的死循环。
+     */
+    @Test
+    void mineStanceStaticPredicateAgreesWithTheGoalObject() {
+        NavGoal stance = NavGoal.mineStance(T);
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dy = -4; dy <= 4; dy++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    BlockPos feet = T.offset(dx, dy, dz);
+                    assertEquals(stance.isAt(feet), NavGoal.mineStanceAt(T, feet),
+                            "站位判据分叉于 " + feet);
+                }
+            }
+        }
+    }
+
+    /**
+     * 同尺钉之二:{@code near} 的成员判据(任务层用它把"已经站在跟前"的掉落物成员
+     * 挡在目标之外)。贴着的那几格必须成立,两格开外必须不成立 —— 那条线正是"走过去
+     * 踩一脚"的边界。
+     */
+    @Test
+    void nearStaticPredicateAgreesWithTheGoalObject() {
+        NavGoal near = NavGoal.near(T, 1.0);
+        assertTrue(NavGoal.withinNear(T, 1.0, T), "站在物品那一格");
+        assertTrue(NavGoal.withinNear(T, 1.0, T.below()), "物品在脚下一格:同一把整数格球");
+        assertFalse(NavGoal.withinNear(T, 1.0, T.north(2)), "两格开外");
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    BlockPos feet = T.offset(dx, dy, dz);
+                    assertEquals(near.isAt(feet), NavGoal.withinNear(T, 1.0, feet),
+                            "near 判据分叉于 " + feet);
+                }
+            }
+        }
     }
 }

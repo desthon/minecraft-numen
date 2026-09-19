@@ -28,6 +28,10 @@ import net.minecraft.world.phys.Vec3;
  * until the head clears the water, then goes dormant — the wake/refill band
  * gives an idle body in deep water a natural bob cycle instead of a grave.
  *
+ * <p>水面上它把身体多拿一会儿:{@link SurvivalDecisions#airRefilled} 之前不交还 ——
+ * 头一出水面就还回去,任务层下一刻又把她按回水里,氧气只回了十几点,表现就是
+ * "潜下去挖、被氧气拽上来、再下去"的拉锯(2026-09-19 实机)。
+ *
  * <p>Straight-up handles the open-water cases. Under a sealed ceiling (frozen
  * ocean, flooded cave — the terrain that actually drowned a body while it
  * pressed uselessly against pack ice) it BFS-walks the connected water for the
@@ -75,8 +79,13 @@ public final class BreathChain implements Task, com.dwinovo.numen.task.reflex.Re
         // 路子漏掉 invulnerable(能力位不随 .dat 存取,见 Companions#restoreUnpersistedAbilities),
         // 她照样会憋气,这里兜住。
         boolean sealed = eyesInWater && ceilingSealed(companion);
+        // 手上有活(有一格挖到一半)时再宽限一格:水里挖掘只有岸上五分之一的速度,
+        // 为一次换气把已经沉下去的破坏进度作废,就是"浮上来又下去、一格没挖掉"。
+        // 硬地板仍在(见 SurvivalDecisions#AIR_RESERVE_BUSY_DIG_FLOOR),不会为矿憋死。
+        boolean busyDigging = eyesInWater
+                && com.dwinovo.numen.core.act.BlockDigger.diggingNow(companion);
         boolean airLow = SurvivalDecisions.breathTriggered(eyesInWater, companion.getAirSupply(),
-                eyesInWater ? waterAbove(companion) : 0, sealed);
+                eyesInWater ? waterAbove(companion) : 0, sealed, busyDigging);
         boolean triggered;
         if (WorkProfile.of(companion).fearless()) {
             submergedTicks = eyesInWater ? submergedTicks + 1 : 0;
@@ -87,6 +96,14 @@ public final class BreathChain implements Task, com.dwinovo.numen.task.reflex.Re
             triggered = airLow;
         }
         if (!triggered && episodeActive) {
+            // 头刚出水 ≠ 这一趟换气结束。氧气在水面每刻 +4 回、在水下每刻扣,头一出
+            // 水面就把身体交回去,任务层下一刻又把她按回水里(手上的活还在下面),
+            // 表现就是"潜下去挖、被氧气拽上来、再下去"的拉锯。人在水里就把气喘匀
+            // 再交还(见 SurvivalDecisions#AIR_REBREATHE_LEVEL);已经上了岸就不拦,
+            // 岸上边走边回,没必要为几个氧气质把她钉在原地。
+            if (companion.isInWater() && !SurvivalDecisions.airRefilled(companion.getAirSupply())) {
+                return true;   // 继续持有身体:漂在水面把气吸满
+            }
             noteEpisode(companion);   // head just cleared the water — close the episode
         }
         return triggered;

@@ -123,20 +123,56 @@ public final class GoalCompiler {
      * events.
      */
     public static Compiled mineField(List<BlockPos> ores, List<BlockPos> drops) {
+        return mineField(ores, drops, null);
+    }
+
+    /**
+     * {@link #mineField(List, List)} 加上"身体此刻站在哪一格"。
+     *
+     * <p>{@code standingAt} 非空时,<b>已经被这一格满足的掉落物成员不进目标</b>:复合
+     * 目标里的成员只要有一个在搜索<b>起点</b>就成立,整个目标就"已经到达"——搜索不
+     * 会派发(见 {@code PathingCore.setGoalAndPath} 的 in-goal 短路),导航于是每一刻
+     * 都报 ARRIVED,而真正要挖的矿还在七格开外。这类成员指挥不动任何一段路,只会
+     * 把"搜索目标在脚下即满足"变成一句谎。
+     *
+     * <p>实测(2026-09-19 实机日志):深水里身体浮着不动、脚下那件掉落物又够不到
+     * (拾取是实体包围盒 ±1.0/±0.5,而成员判据是<b>整数格</b>距离 ≤1,两者不是一把尺),
+     * 复合目标就永久成立 —— 挖掘层一问"脚下能挖什么"答"没有",任务层拆导航重规划,
+     * 下一刻全新的导航对象再报一次 ARRIVED:同一驻留 419 条,400 刻后以"没挖到任何
+     * 一格、也没挪窝"收工。
+     *
+     * <p><b>矿位站位不筛</b>:站在站位上正是"就地开挖"的信号(任务层 step 1 会接手),
+     * 掉落物成员则只表示"走过去踩一脚"——已经踩着,就没有下一步了。
+     *
+     * @param standingAt 身体脚下的格子;{@code null} = 不筛(收尾捡掉落物、以及没有
+     *                   身体位置的调用方)
+     */
+    public static Compiled mineField(List<BlockPos> ores, List<BlockPos> drops, BlockPos standingAt) {
         List<NavGoal> members = new ArrayList<>(ores.size() + drops.size());
         for (BlockPos ore : ores) {
             members.add(NavGoal.mineStance(ore));
         }
         for (BlockPos drop : drops) {
+            if (standingAt != null && NavGoal.withinNear(drop, DROP_MEMBER_RADIUS, standingAt)) {
+                continue;   // 已经站在它跟前:这个成员对搜索没有任何信息
+            }
             // 掉落物是"走过去踩到"的目标,不是"站进去"的格子——它压根不是方块。
             // exact(drop) 要求脚位恰好落在物品实体所在的那一格:物品浮在台阶/雪上、
             // 落在半砖边、或者被水推了半格,判据就永远不成立,成员白占一个位置,
             // 身体反而被别的矿位拉走。1 格球邻域与 LootSweep 收战利品用的是同一条
             // (core/common/.../core/task/combat/LootSweep.goal):到达 = 走到它跟前的那一格。
-            members.add(NavGoal.near(drop, 1.0));
+            members.add(NavGoal.near(drop, DROP_MEMBER_RADIUS));
+        }
+        if (members.isEmpty() && standingAt != null) {
+            // 筛完一个成员都不剩(调用方只传了掉落物,而它们全在脚下)。复合目标要求
+            // 至少一个成员,而"原地站着"正是这一刻唯一诚实的意图 —— 走动交给拾取本身。
+            return new Compiled(NavGoal.exact(standingAt), LongSets.EMPTY_SET);
         }
         return new Compiled(NavGoal.composite(members), LongSets.EMPTY_SET);
     }
+
+    /** 掉落物成员的邻域半径(格):"走过去踩一脚"的到达距离,与 LootSweep 同一条。 */
+    private static final double DROP_MEMBER_RADIUS = 1.0;
 
     /**
      * Get beside ANY of these same-kind blocks (a "walk to the nearest X"

@@ -142,6 +142,8 @@ dependencies {
     compileOnly project(':plugins:tlm')
     compileOnly project(':plugins:litematica')
     compileOnly project(':plugins:ftbquests')
+    // 连锁挖矿:两道闸(FTB Ultimine / Vein Mining 各判各的类名),见 Builtin。
+    compileOnly project(':plugins:chainmine')
 
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
     // refmap 由 mixin 注解处理器在编译期生成——AP 必须显式挂上,否则 mixin 照样编译
@@ -231,4 +233,5 @@ tasks.matching { it.name == 'jar' || it.name == 'jarJar' }.configureEach {
     it.from({ project(':plugins:tlm').sourceSets.main.output })
     it.from({ project(':plugins:litematica').sourceSets.main.output })
     it.from({ project(':plugins:ftbquests').sourceSets.main.output })
+    it.from({ project(':plugins:chainmine').sourceSets.main.output })
 }

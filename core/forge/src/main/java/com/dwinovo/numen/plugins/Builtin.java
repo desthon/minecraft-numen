@@ -46,12 +46,27 @@ public final class Builtin {
         // dev.ftb.mods.ftbquests)。它没用 mod id 判:类在不在是更硬的事实。
         gate.openByClass("dev.ftb.mods.ftbquests.FTBQuests", "ftbquests",
                 skills -> () -> FtbQuestsOnServer.install(skills));
+
+        // 连锁挖矿:同一个联动的两道闸——目标模组有两个常见选择(FTB Ultimine / Vein Mining),
+        // 各自的类名都不一样,谁在场谁开。两个都在时 install 会被叫两次,NumenChainmine 自己
+        // 只装一次(工具注册表对重名是直接抛的)。判据仍是"类在不在",不是 mod id。
+        gate.openByClass("dev.ftb.mods.ftbultimine.FTBUltimine", "chainmine",
+                skills -> () -> ChainMineOnServer.install(skills));
+        gate.openByClass("com.illusivesoulworks.veinmining.common.veinmining.VeinMiningPlayers", "chainmine",
+                skills -> () -> ChainMineOnServer.install(skills));
     }
 
     /** FTB Quests 联动只写原版(读的是文本文件),两个加载器上要装的东西一字不差。 */
     private static final class FtbQuestsOnServer {
         static void install(Path skills) {
             com.dwinovo.numen.plugins.ftbquests.NumenFtbQuests.install(skills);
+        }
+    }
+
+    /** 连锁挖矿联动只写原版(激活状态全走反射调目标模组的服务端口),两个加载器上要装的东西一字不差。 */
+    private static final class ChainMineOnServer {
+        static void install(Path skills) {
+            com.dwinovo.numen.plugins.chainmine.NumenChainmine.install(skills);
         }
     }
 

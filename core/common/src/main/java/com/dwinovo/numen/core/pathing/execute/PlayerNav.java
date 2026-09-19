@@ -316,8 +316,15 @@ public final class PlayerNav {
         TerrainPermit permit();
     }
 
-    /** ARRIVED-IN-PLACE 已打点(边沿去重)。 */
-    private boolean arrivedInPlaceLogged;
+    /**
+     * 上一次 ARRIVED-IN-PLACE 打点的"驻留"键(feet ⊕ goal-center)。
+     *
+     * <p><b>静态的</b>:任务层在"到位却无事可做"时逐刻重建导航对象,实例级的边沿
+     * 去重根本锁不住同一处驻留——实机里同一格 INFO 打了 419 条(2026-09-19 日志),
+     * 把整份日志冲成一条河,淹掉了真正的证据。键里带着两处坐标,所以不同同伴、
+     * 不同驻留各打各的,只有"完全同一处、同一条结论"才被收成一条。
+     */
+    private static volatile long arrivedInPlaceLoggedKey = Long.MIN_VALUE;
 
     public Status tick() {
         NavProfiler.tickFrame();
@@ -432,10 +439,9 @@ public final class PlayerNav {
             BlockPos feet = PathExecutor.playerFeet(player);
             if (engineGoal.isInGoal(feet.getX(), feet.getY(), feet.getZ())) {
                 searchSatisfied = true;
-                if (!arrivedInPlaceLogged) {
-                    // 只在进入边沿打一次:任务层反复重建导航时,同一驻留会逐 tick 重进
-                    // 这个分支,连续打点是日志洪水
-                    arrivedInPlaceLogged = true;
+                long key = residencyKey(feet, plannedCenter);
+                if (key != arrivedInPlaceLoggedKey) {
+                    arrivedInPlaceLoggedKey = key;
                     Constants.LOG.info(
                             "[numen-path] ARRIVED-IN-PLACE feet={} goal-center={} —— 搜索目标在脚下"
                                     + "即满足,钉稳结论交任务层裁决",
@@ -445,6 +451,12 @@ public final class PlayerNav {
             }
         }
         return Status.RUNNING;
+    }
+
+    /** 一处"到位即满足"驻留的键:两格坐标混成一个 long(见 {@link #arrivedInPlaceLoggedKey})。 */
+    private static long residencyKey(BlockPos feet, BlockPos center) {
+        long h = feet.asLong() * 0x9E3779B97F4A7C15L;
+        return h ^ (center.asLong() + 0x9E3779B97F4A7C15L + (h << 6) + (h >>> 2));
     }
 
     /**

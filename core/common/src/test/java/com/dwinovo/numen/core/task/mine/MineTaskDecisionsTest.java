@@ -5,7 +5,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -63,6 +65,59 @@ class MineTaskDecisionsTest {
                 }
             }
         }
+    }
+
+    // ---- "脚下这一格是不是某颗矿的站位" ----
+
+    @Test
+    void stanceOreIsFoundAtTheBodysFeet() {
+        // 与导航宣布到位用的是同一条判据(NavGoal.mineStanceAt):身体贴着它、脚不高于它
+        assertEquals(FEET, MineCompanionTask.stanceOreAt(FEET, List.of(FEET)),
+                "站在矿那一格(可进入的格)算站位");
+        assertEquals(FEET.east(), MineCompanionTask.stanceOreAt(FEET, List.of(FEET.east())),
+                "贴着它站着算站位");
+        assertEquals(FEET.above(), MineCompanionTask.stanceOreAt(FEET, List.of(FEET.above())),
+                "矿在头那一格(身体贴着它)是站位");
+        assertEquals(FEET.above(2), MineCompanionTask.stanceOreAt(FEET, List.of(FEET.above(2))),
+                "矿在头顶两格:两格高的身体仍够得着,是站位");
+    }
+
+    @Test
+    void stanceOreRejectsCellsTheBodyCannotWorkFrom() {
+        assertNull(MineCompanionTask.stanceOreAt(FEET, List.of(FEET.east(2))),
+                "水平两格开外:不是站位(墙外那颗矿不该让导航宣布到位)");
+        assertNull(MineCompanionTask.stanceOreAt(FEET, List.of(FEET.below())),
+                "踩在它头上不算:那一格是她自己的地板");
+        assertNull(MineCompanionTask.stanceOreAt(FEET, List.of(FEET.above(3))),
+                "头顶三格:身体够不着了");
+    }
+
+    @Test
+    void aSatisfiedStanceIsNeverFarAway() {
+        // [ANCHOR arrived-dud-pin] 这条是实机判读的地基:站位成立时矿位离脚必然
+        // ≤2 格(dx+dz+|bodyDy|≤1,竖直方向最多折到"矿在脚上两格")。所以日志里
+        // "ARRIVED-IN-PLACE 而最近矿位 dist=2.8 / 6.1 / 11.0"只能是别的成员
+        // (掉落物邻域)给出的到达 —— 不是"七格开外的矿也被判到位"。
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dy = -4; dy <= 2; dy++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    BlockPos ore = FEET.offset(dx, dy, dz);
+                    if (MineCompanionTask.stanceOreAt(FEET, List.of(ore)) != null) {
+                        assertTrue(Math.sqrt(FEET.distSqr(ore)) <= 2.0 + 1e-9,
+                                "站位成立就必须在 2 格内:" + ore + " dist="
+                                        + Math.sqrt(FEET.distSqr(ore)));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void stancePickIsTheNearestOne() {
+        // 名单已按距离排序:第一个命中的就是最近那颗,别去开挖名单里更远的一格
+        BlockPos near = FEET.east();
+        BlockPos far = FEET.west();
+        assertTrue(MineCompanionTask.stanceOreAt(FEET, List.of(near, far)).equals(near));
     }
 
     // ---- 掉落物与已知矿位的覆盖关系 ----

@@ -157,12 +157,61 @@ class SurvivalDecisionsTest {
     }
 
     @Test
+    void aHalfDugBlockBuysOneMoreBlockOfTime() {
+        // 手上有活(有一格挖到一半):把平白留着的 60 刻余裕让给这一格 —— 水里挖掘
+        // 只有岸上五分之一速度,为一次换气作废进度就是"浮上浮下、一格没挖掉"。
+        assertFalse(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.AIR_RESERVE_BUSY_DIG_FLOOR + 1, 0, false, true));
+        assertTrue(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.AIR_RESERVE_BUSY_DIG_FLOOR, 0, false, true));
+        // 硬地板仍在:不会为了一格矿把自己憋到没氧
+        assertTrue(SurvivalDecisions.AIR_RESERVE_BUSY_DIG_FLOOR > 0);
+        assertTrue(SurvivalDecisions.AIR_RESERVE_BUSY_DIG_FLOOR
+                < SurvivalDecisions.AIR_RESERVE_FLOOR);
+    }
+
+    @Test
+    void busyDiggingNeverShortensTheSwimUpReserve() {
+        // 关键的一条:宽限只吃掉那条"平白留着的"地板,不吃上浮本身要的时间。
+        // 10 格水要 80 刻才划得上去,手上有活也一样得留满 —— 否则就是拿命换一格。
+        assertFalse(SurvivalDecisions.breathTriggered(true, 81, 10, false, true));
+        assertTrue(SurvivalDecisions.breathTriggered(true, 80, 10, false, true));
+    }
+
+    @Test
+    void busyDiggingNeverShortensASealedCeiling() {
+        // 头顶封住时是横着游去找透气口(最坏走满搜索半径),不受"手上有活"影响
+        assertFalse(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.SEALED_CEILING_AIR_TICKS + 1, 0, true, true));
+        assertTrue(SurvivalDecisions.breathTriggered(
+                true, SurvivalDecisions.SEALED_CEILING_AIR_TICKS, 0, true, true));
+    }
+
+    @Test
     void sealedCeilingKeepsTheWideReserve() {
         // 头顶被冰面/岩层封住:要横着游去找最近的透气口,余量照旧给宽
         assertTrue(SurvivalDecisions.breathTriggered(
                 true, SurvivalDecisions.SEALED_CEILING_AIR_TICKS, 0, true));
         assertFalse(SurvivalDecisions.breathTriggered(
                 true, SurvivalDecisions.SEALED_CEILING_AIR_TICKS + 1, 0, true));
+    }
+
+    @Test
+    void theBodyIsNotHandedBackBeforeTheAirIsBreathedIn() {
+        // 头一出水面就交还身体 = 任务层下一刻又把她按回水里(手上的活还在下面),
+        // 氧气只回十几点 —— 那正是主人看到的"潜下去挖、被氧气拽上来、再下去"。
+        // 换气链在水里要持有身体直到气回够(见 BreathChain.canRun)。
+        assertFalse(SurvivalDecisions.airRefilled(SurvivalDecisions.AIR_REBREATHE_LEVEL - 1));
+        assertTrue(SurvivalDecisions.airRefilled(SurvivalDecisions.AIR_REBREATHE_LEVEL));
+        assertTrue(SurvivalDecisions.airRefilled(300));
+        // 不变式:交还线必须高过"该浮"的每一条,否则刚交还身体就立刻再触发换气,
+        // 身体在两个反射之间空转(浅水的 60、深水的封顶 180、封顶水道的 240)
+        assertTrue(SurvivalDecisions.AIR_REBREATHE_LEVEL > SurvivalDecisions.AIR_RESERVE_FLOOR);
+        assertTrue(SurvivalDecisions.AIR_REBREATHE_LEVEL > SurvivalDecisions.AIR_RESERVE_CAP);
+        assertTrue(SurvivalDecisions.AIR_REBREATHE_LEVEL
+                > SurvivalDecisions.SEALED_CEILING_AIR_TICKS);
+        assertTrue(SurvivalDecisions.AIR_REBREATHE_LEVEL <= 300, "别越过原版满氧 300");
+        assertTrue(SurvivalDecisions.airRefilled(SurvivalDecisions.AIR_REBREATHE_LEVEL));
     }
 
     @Test

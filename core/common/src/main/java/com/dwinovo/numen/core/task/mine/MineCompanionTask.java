@@ -109,6 +109,15 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *  不会来的射线。 */
     private static final int MAX_NO_SHOT_TICKS = 20;
     /**
+     * 手上这一格够不到之后,闩锁还留多久(刻)。
+     *
+     * <p>换气反射抢走身体把她拉上水面时,那一格会滑出触及范围 —— 旧代码在这一刻
+     * {@code digger.cancel()},于是已经沉下去的破坏进度整段作废,回来从 0 重挖。
+     * 三秒(60 刻)是"上浮换口气再潜回来"的量级:够得着她会接手继续,够不着闩锁
+     * 到期自动放下,不会永远占着任务不放(见 {@link #STALL_TICKS})。
+     */
+    private static final int DIG_LATCH_GRACE_TICKS = 60;
+    /**
      * 既没挖掉一格、也没挪窝多远,持续这么多刻就算真卡住了(二十秒)。
      *
      * <p><b>两个条件同时成立才算</b>:她走三十秒的路去远处挖矿,一刻都不算卡 —— 她在动。
@@ -182,6 +191,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     /** The ore currently returning {@code NO_SHOT}, and for how many consecutive ticks. */
     private BlockPos noShotPos;
     private int noShotTicks;
+    /** 最近一条"到位却不开火"的站位矿 —— 只为把这行 DEBUG 收成边沿一条。 */
+    private BlockPos loggedStanceDud;
+    /** 手上这一格够不到的连续刻数(见 {@link #DIG_LATCH_GRACE_TICKS})。 */
+    private int digLatchTicks;
     /** 上一次真有进展(挖掉一格)或明显挪窝的时刻与位置 —— 卡死判定的量尺。 */
     private long lastProgressTick;
     private BlockPos lastProgressPos;
@@ -276,15 +289,24 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         //    until it breaks or drifts out of reach.
         BlockPos digging = digger.current();
         if (digging != null) {
-            if (level.getBlockState(digging).isAir() || !reachable(digging)) {
-                digger.cancel();
-            } else {
+            if (level.getBlockState(digging).isAir()) {
+                digger.cancel();          // 那一格没了(自己破在半途/被谁挖了):闩锁作废
+            } else if (reachable(digging)) {
+                digLatchTicks = 0;
                 if (nav != null) {
                     nav.pause();   // stand still for the dig; goal/path/in-flight search stay warm
                 }
                 mineProgress(digging);
                 return TaskState.RUNNING;
+            } else if (++digLatchTicks > DIG_LATCH_GRACE_TICKS) {
+                digger.cancel();          // 够不到太久了:这一格先放下,让任务换目标
+                digLatchTicks = 0;
             }
+            // 够不到、但还在宽限里:闩锁留着往下走 —— 目标、已沉下去的破坏进度都还在。
+            // 换气反射把她拉上水面是暂态,潜回去要接着挖的正是同一格;这里丢掉闩锁
+            // 就是 ABORT + 从 0 重来,而水里挖掘本来就只有岸上的五分之一速度。
+        } else {
+            digLatchTicks = 0;
         }
 
         long tDrops = NavProfiler.begin();
@@ -338,18 +360,32 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                     // pauses the nav and digs. Only clear inputs here (pause), never tear the nav down:
                     // teardown would throw away the goal + any in-flight search and force a cold restart.
                     nav.pause();
-                    // [ANCHOR arrived-dud] 到了站位,却什么都够不到。<b>这不构成关于任何一颗矿的
-                    // 证据</b>:最常见的两种成因根本不是故障 —— 她到的是复合目标里的<b>掉落物</b>
-                    // 成员(刚捡完东西,附近本来就没矿),或者这一刻人在空中(reachableTarget 第一行
-                    // 就要求 onGround)。剩下的"被别的矿包住、射线打不到"也只是<b>还没轮到它</b>,
-                    // 外层挖掉自己就露出来了。
+                    // [ANCHOR arrived-dud] 到了站位,却什么都够不到。
                     //
-                    // 所以这里只重新规划。真卡住了由 STALL_TICKS 那把尺子收工,不记账到某一格。
+                    // 复合目标的成员只有两种:矿位站位(mineStance)与掉落物邻域(near drop)。
+                    // 掉落物里"身体已经站在跟前"的那些在 oreFieldCompiled 就被剔除
+                    // ([ANCHOR arrived-dud-pin]),所以还能在这儿成立的就只剩矿位站位。
                     if (reachableTarget() == null && !knownOres.isEmpty()) {
-                        com.dwinovo.numen.core.Constants.LOG.debug(
-                                "[numen-task] mine ARRIVED 但够不到 feet={} nearestOre={} —— 重规划",
-                                player.blockPosition().toShortString(), nearestOreInfo());
-                        stopNav();
+                        BlockPos stance = stanceOreAt(player.blockPosition(), knownOres);
+                        if (stance != null) {
+                            // 站在它的站位上,可达性预检却不开火:眼睛到它的那条射线被檐口挡着,
+                            // 或者人这一刻在水里/半空 —— reachableTarget 第一行就要求 onGround,
+                            // 而深水里她永远踩不到地,于是"贴着矿也永远不动手"。
+                            //
+                            // 这里直接按这一格开挖,不再"拆导航 → 重规划 → 还是这一格"地转
+                            // (实测那样能转满 400 刻):digStep 自己带遮挡物回退(打掉挡
+                            // 射线的那片叶子)与 NO_SHOT 记账 —— 真拉不出射线的格,20 刻后照旧
+                            // 由 MAX_NO_SHOT_TICKS 出账,名单前进。
+                            if (!stance.equals(loggedStanceDud)) {
+                                loggedStanceDud = stance.immutable();
+                                com.dwinovo.numen.core.Constants.LOG.debug(
+                                        "[numen-task] mine ARRIVED 但可达性预检不开火:按站位直接开挖 {} "
+                                                + "| feet={} nearestOre={}",
+                                        stance.toShortString(),
+                                        player.blockPosition().toShortString(), nearestOreInfo());
+                            }
+                            mineProgress(stance);
+                        }
                     }
                     return TaskState.RUNNING;   // a reachable shaft is handled next tick
                 }
@@ -525,8 +561,26 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             // Degenerate frame (targets vanished between ticks): stand where we are.
             return GoalCompiler.standOn(player.blockPosition());
         }
+        // [ANCHOR arrived-dud-pin] 还有矿要挖时,脚下已经满足的掉落物成员不进目标。
+        // 起点就成立的成员指挥不动搜索,只会让复合目标凭空宣布"已到位"——实测里
+        // 她浮在深水上、脚下那件够不到的掉落物把身体钉死 400 刻,而最近的矿在 7 格外。
+        // 名单里没矿了(收尾捡掉落物)才让掉落物成员说了算。
+        BlockPos standingAt = knownOres.isEmpty() ? null : player.blockPosition();
         return GoalCompiler.mineField(
-                new ArrayList<>(knownOres), new ArrayList<>(drops));
+                new ArrayList<>(knownOres), new ArrayList<>(drops), standingAt);
+    }
+
+    /**
+     * 脚下这一格是不是某颗已知矿的站位;<b>名单已按距离排序</b>,所以第一个命中的就是
+     * 最近的那颗。判据与导航宣布"到位"用的是同一条({@link NavGoal#mineStanceAt})。
+     */
+    static BlockPos stanceOreAt(BlockPos feet, List<BlockPos> ores) {
+        for (BlockPos ore : ores) {
+            if (NavGoal.mineStanceAt(ore, feet)) {
+                return ore;
+            }
+        }
+        return null;
     }
 
     /** 收尾阶段的目标:只有掉落物,没有矿位 —— 数量已经够了,不再多挖一格目标。 */

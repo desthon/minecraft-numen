@@ -64,6 +64,35 @@ public final class BlockDigger {
         this.player = player;
     }
 
+    /**
+     * 每具身体"手上有活"的挖掘器 —— 有一格挖了一半、<b>真实破坏进度已经沉下去</b>的
+     * 那些。换气反射按它决定要不要再宽限一格的时间(见
+     * {@link com.dwinovo.numen.core.task.survival.SurvivalDecisions#breathTriggered})。
+     *
+     * <p>静态是因为反射拿不到任务里的那个挖掘器实例(注册表这点与
+     * {@code PathingCore.liveCores()} 同一路子)。条目只在真的积累了进度时进来,
+     * 破块/取消/重开时出去;被抢占后闩锁还在的那段时间里它继续算"有活",
+     * 这正是要的:潜回去要接着挖的是同一格。
+     */
+    private static final java.util.Set<BlockDigger> DIGGING =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * 这具身体此刻是不是"手上有活"——有一格挖到一半、进度已经沉进服务端与本地破坏
+     * 计数里。水里挖掘只有岸上的五分之一速度(无水下速掘),被打断一次就从头再来,
+     * 所以换气反射值得为这一格多留一点氧。
+     */
+    public static boolean diggingNow(NumenPlayer player) {
+        DIGGING.removeIf(d -> d.player.isRemoved());
+        for (BlockDigger d : DIGGING) {
+            if (d.player == player && d.pos != null && d.progress > 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+
     /** The block currently being dug, or {@code null} when idle. */
     public BlockPos current() {
         return pos;
@@ -225,6 +254,7 @@ public final class BlockDigger {
 
         // Survival: accumulate the real per-tick destroy fraction; broadcast the crack.
         progress += state.getDestroyProgress(player, level, pos);
+        DIGGING.add(this);   // 有进度沉下去了 —— 换气反射从此给这一格宽限(见 diggingNow)
         int stage = Math.min(9, (int) (progress * 10.0f));
         level.destroyBlockProgress(CRACK_ID, pos, stage);
         player.swing(InteractionHand.MAIN_HAND);
@@ -278,6 +308,7 @@ public final class BlockDigger {
         pos = null;
         progress = 0.0f;
         started = false;
+        DIGGING.remove(this);
     }
 
     /**

@@ -101,15 +101,54 @@ public final class SurvivalDecisions {
      * @param blocksToSurface 正上方还有几格水(不是直上时给 0 即可)
      * @param sealedCeiling   头顶被封住(要走横向找口子),余量按
      *                        {@link #SEALED_CEILING_AIR_TICKS} 走
+     *
+     * <p>"手上有没有活"按 {@code false} 走;要给它宽限(手上一格挖到一半)用五参那条。
      */
     public static boolean breathTriggered(boolean headUnderWater, int airSupply,
                                           int blocksToSurface, boolean sealedCeiling) {
+        return breathTriggered(headUnderWater, airSupply, blocksToSurface, sealedCeiling, false);
+    }
+
+    /**
+     * <b>手上有活时的上浮硬地板(刻)</b>:还剩 1 秒就无论如何都要上去,哪怕这一格
+     * 正挖到一半。
+     *
+     * <p>依据:上浮本身要的时间已经算在余量里了({@link #airReserve} 每格 8 刻,
+     * 封顶 180),这条地板压掉的只是那个"平白留着的 60 刻余裕"(见
+     * {@link #AIR_RESERVE_FLOOR});20 刻足够划上去 2~3 格,也就是这条地板真正起
+     * 作用的水深(
+     * {@code blocksToSurface * 8 < 60},即浅于 8 格)。再深时余量由水深项说了算,
+     * 这条地板根本不参与 —— 该浮就得浮,不是"为了一格矿把自己憋死"。
+     */
+    public static final int AIR_RESERVE_BUSY_DIG_FLOOR = 20;
+
+    /**
+     * 换气触发条件,外加"手上是不是正挖着半格"。
+     *
+     * <p>{@code busyDigging} 为真时(人在水里、且有一格挖到一半 ——
+     * {@code BlockDigger.diggingNow}),把平白留着的 {@link #AIR_RESERVE_FLOOR} 让给
+     * 这一格:水里挖掘无水下速掘时只有岸上五分之一的速度,上浮一次就把进度整段作废
+     * ——"浮上浮下、一格没挖掉"正是主人看到的那条恶性循环。上浮所需的水深余量
+     * ({@code blocksToSurface * 8})与 {@link #AIR_RESERVE_BUSY_DIG_FLOOR} 两条都保留。
+     *
+     * <p>头顶封住那种<b>不适用</b>:那时不是直着上去,而是横着游去找最近的透气口
+     * ({@code BreathChain#findAirColumn},最坏要走满搜索半径 16 格),留着
+     * {@link #SEALED_CEILING_AIR_TICKS} 的宽口径。
+     */
+    public static boolean breathTriggered(boolean headUnderWater, int airSupply,
+                                          int blocksToSurface, boolean sealedCeiling,
+                                          boolean busyDigging) {
         if (!headUnderWater) {
             return false;
         }
-        return airSupply <= (sealedCeiling
-                ? SEALED_CEILING_AIR_TICKS
-                : airReserve(blocksToSurface));
+        if (sealedCeiling) {
+            return airSupply <= SEALED_CEILING_AIR_TICKS;
+        }
+        int reserve = busyDigging
+                ? Math.max(AIR_RESERVE_BUSY_DIG_FLOOR,
+                        Math.min(AIR_RESERVE_CAP, blocksToSurface * AIR_TICKS_PER_BLOCK_UP))
+                : airReserve(blocksToSurface);
+        return airSupply <= reserve;
     }
 
     /**
@@ -129,6 +168,31 @@ public final class SurvivalDecisions {
 
     /** 无畏画像下没顶多久才认作"闲置沉底"(刻):10 秒,留给换段/重规划的空档。 */
     public static final int FEARLESS_FLOAT_DELAY_TICKS = 200;
+
+    /**
+     * <b>换气结束线(刻)</b>:头出了水面还不够,得把气喘回来 —— 到这个氧气质才把身体
+     * 交还给任务。
+     *
+     * <p>为什么要有这条:水面上氧气是<b>每刻 +4</b> 回的,而水面下每一刻都在扣。头一出
+     * 水面就把身体交回去,任务层下一刻就把她按回水里(她手上的活还在下面),于是氧气
+     * 只回了十几点又得浮上来 —— 主人看到的就是"潜下去挖、被氧气拽上来、再下去"的
+     * 拉锯。
+     *
+     * <p>取 260 的唯一理由是那条<b>不变式</b>:交还线必须高于"该浮"的每一条线
+     * ({@link #AIR_RESERVE_FLOOR} 60、{@link #AIR_RESERVE_CAP} 180、
+     * {@link #SEALED_CEILING_AIR_TICKS} 240)。低一条,交还身体的那一刻下一潜就立刻
+     * 再次触发换气,身体在两个反射之间空转。代价是水面上多待 50 刻(2.5 秒,水里
+     * 每刻回 4 点),换来的是下一潜带着将近满罐氧气下去。
+     */
+    public static final int AIR_REBREATHE_LEVEL = 260;
+
+    /**
+     * 气回够了没有 —— 换气链据此决定什么时候把她交还给任务(见
+     * {@link #AIR_REBREATHE_LEVEL})。
+     */
+    public static boolean airRefilled(int airSupply) {
+        return airSupply >= AIR_REBREATHE_LEVEL;
+    }
 
     // ---- hunger thresholds (vanilla: below 6 you can't sprint; below 18 regen stops) ----
     /**

@@ -23,10 +23,13 @@ dependencies {
 
     // 内嵌的联动模组。compileOnly:只有 Builtin 那道闸要看见它的 install 入口,
     // 类与资源由下面的 jar 块平铺进发行 jar,不作为独立依赖出现在 POM 里。
-    // 只有 YSM、Litematica 与 FTB Quests:车万女仆没有 Fabric 版。
+    // 只有 YSM、Litematica、FTB Quests 与连锁挖矿:车万女仆没有 Fabric 版。
+    // 连锁挖矿那两行是同一个联动的两道闸(FTB Ultimine / Vein Mining 各判各的类),
+    // 谁在场谁开;两个都在时 NumenChainmine.install 自己只装一次。
     compileOnly project(':plugins:ysm')
     compileOnly project(':plugins:litematica')
     compileOnly project(':plugins:ftbquests')
+    compileOnly project(':plugins:chainmine')
 }
 
 loom {
@@ -74,6 +77,7 @@ tasks.named('jar', Jar) {
     from({ project(':plugins:ysm').sourceSets.main.output })
     from({ project(':plugins:litematica').sourceSets.main.output })
     from({ project(':plugins:ftbquests').sourceSets.main.output })
+    from({ project(':plugins:chainmine').sourceSets.main.output })
 }
 
 // Implement mcgradleconventions loader attribute

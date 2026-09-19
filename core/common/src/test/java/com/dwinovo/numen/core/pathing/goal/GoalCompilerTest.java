@@ -83,6 +83,41 @@ class GoalCompilerTest {
     }
 
     @Test
+    void mineFieldDropsSocketMembersTheBodyAlreadyStandsOn() {
+        // [ANCHOR arrived-dud-pin] 起点就成立的成员指挥不动搜索,只会让复合目标凭空
+        // 宣布"已到位" —— 实机里她浮在深水上、脚下那件够不到的掉落物把身体钉死 400 刻,
+        // 而最近要挖的矿在 7 格开外(同驻留 419 条 ARRIVED-IN-PLACE)。
+        BlockPos ore = T.east(7);
+        BlockPos underfoot = T.below();
+        BlockPos farDrop = T.north(5);
+        GoalCompiler.Compiled c = GoalCompiler.mineField(
+                List.of(ore), List.of(underfoot, farDrop), T);
+        assertFalse(c.goal().isAt(T), "唯一那件「脚下即满足」的掉落物成员被剔除,目标在起点不再成立");
+        assertTrue(c.goal().isAt(farDrop), "没站在跟前的掉落物成员照旧留着(顺路踩一脚)");
+        assertTrue(c.goal().isAt(ore.north()), "矿位站位照旧:站在站位上正是就地开挖的信号");
+        // 脚下那一件仍够不到的掉落物:目标不再被它钉住,身体会朝矿走
+        assertFalse(c.goal().isAt(T.below(2)), "起点之外没有任何成员成立");
+    }
+
+    @Test
+    void mineFieldWithoutAStandingPointKeepsEveryMember() {
+        // 没有身体位置的调用方(收尾捡掉落物那一趟)不筛:那一刻掉落物就是全部意图
+        BlockPos drop = T.below();
+        GoalCompiler.Compiled c = GoalCompiler.mineField(List.of(), List.of(drop));
+        assertTrue(c.goal().isAt(drop), "不传身体位置 = 不筛,成员原样保留");
+    }
+
+    @Test
+    void mineFieldWithEverythingUnderfootStandsWhereItIs() {
+        // 筛完一个成员都不剩:复合目标要求至少一个成员,而「原地站着」是这一刻唯一
+        // 诚实的意图 —— 走动交给拾取本身(不能抛 IllegalArgumentException)
+        BlockPos drop = T.below();
+        GoalCompiler.Compiled c = GoalCompiler.mineField(List.of(), List.of(drop), drop);
+        assertTrue(c.goal().isAt(drop), "退化成一格站位:就在掉落物那一格站着");
+        assertFalse(c.goal().isAt(T), "不是「哪儿都算到」");
+    }
+
+    @Test
     void mineFieldOnlyAdmitsCellsWhoseBodyTouchesTheOre() {
         GoalCompiler.Compiled c = GoalCompiler.mineField(List.of(T), List.of());
         assertTrue(c.goal().isAt(T.below(2)), "脚在下两格:矿贴着头顶");
