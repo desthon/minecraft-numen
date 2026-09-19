@@ -27,11 +27,11 @@ public final class CraftTool implements NumenTool {
     public String description() {
         return "Craft an item from materials in your inventory — one call does the whole flow: finds "
                 + "the recipe, lays the ingredients into a real crafting grid, and takes the result. "
-                + "2x2 recipes work anywhere; a 3x3 recipe needs a crafting table within reach "
-                + "(~4 blocks) — the result tells you where the nearest one is, or that you should "
-                + "place one (a crafting_table is 4 planks, 2x2). Missing materials are reported with "
-                + "exact shortfalls — collect or craft those first, then call again. Crafts up to "
-                + "`count` of the item and stops early (reported) if materials run out or the "
+                + "2x2 recipes work anywhere. A 3x3 recipe needs a crafting table, and you do NOT have to fetch "
+                + "one: if none is within reach this tool handles it — it puts down a table you carry, or crafts "
+                + "one (4 planks; logs get sawn first), uses it and takes it back when the craft is done. It only "
+                + "sends you walking when a table stands within ~16 blocks. Missing materials come back as exact "
+                + "shortfalls to collect first; it still crafts up to `count` of the item and stops early if "
                 + "inventory fills. Only for [crafting] recipes — smelting/stonecutter/smithing still "
                 + "go through interact_at + transfer on their station.";
     }

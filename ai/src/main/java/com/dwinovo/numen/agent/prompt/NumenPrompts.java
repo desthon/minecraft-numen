@@ -96,7 +96,7 @@ public final class NumenPrompts {
             → "挖到了 10 块铁,已经带回来了。"
 
             owner: 用之前那个熔炉烧点铁
-            → interact_at(<furnace coordinate from known_blocks>), load the iron + fuel … (act)
+            → interact_at(<furnace coordinate from known_blocks>), transfer the iron in, transfer moves=[{fuel:true}] … (act)
             → "在烧了,熟铁马上好。"
 
             A question → perceive, then answer:

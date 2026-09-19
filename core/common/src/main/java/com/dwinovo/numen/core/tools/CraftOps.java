@@ -3,26 +3,34 @@ package com.dwinovo.numen.core.tools;
 import com.dwinovo.numen.agent.tool.ToolArgs;
 import com.dwinovo.numen.core.PlayerInv;
 import com.dwinovo.numen.core.act.Interaction;
+import com.dwinovo.numen.core.act.WorkstationPlan;
 import com.dwinovo.numen.core.scan.BlockScanner;
+import com.dwinovo.numen.core.scan.OwnerBuildMemory;
+import com.dwinovo.numen.entity.InputDriver;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.task.TaskResult;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.MenuProvider;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.CraftingContainer;
 import net.minecraft.world.inventory.ResultSlot;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.crafting.CraftingRecipe;
 import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.item.crafting.ShapedRecipe;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.CraftingTableBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -47,9 +55,16 @@ import net.minecraft.util.Mth;
  * items never appear out of thin air.
  *
  * <p>Grid choice: an already-open grid that fits &gt; the body's own 2x2 &gt; a
- * crafting table within reach (right-clicked open, closed after). No table in
- * reach is a refusal with the nearest table's coordinates (or "place one") — going
- * there is the planner's move, not this tool's.
+ * crafting table within reach (right-clicked open, closed after).
+ *
+ * <p><b>3x3 而附近没有台时不回绝。</b>原先这里是回一句「最近的在 X,走过去再叫一次」——
+ * 那是把活派回给模型。主人要的是她自己解决:照 {@link WorkstationPlan} 走四条路
+ * (够得着就用 → 身上带着就放下 → 料够就现造一个 → 都不行才走远路),用完把<b>自己放下的
+ * 那一个</b>收回来(见 {@link #reclaimTable}:不是她放的一律不动)。
+ *
+ * <p>为什么回收是安全的:判据只有一条——「是她在这一次调用里刚放下的」。
+ * {@code OwnerBuildMemory} 在这里<b>不能</b>当许可用:它由放置 mixin 写入,记的是「玩家放的」,
+ * 分不清是主人还是她自己(她也是玩家),拿它否决等于永远收不回自己放的东西。
  */
 public final class CraftOps {
 
@@ -118,6 +133,9 @@ public final class CraftOps {
         Cand chosen = null;
         boolean openedTable = false;
         String station = null;
+        // 这一次自己放下的工作台:用完按 WorkstationPlan 收回来。只记本次调用放的——
+        // 「是不是我放的」在这里是个本地事实,不是查表查出来的(见类注释)。
+        BlockPos placedByMe = null;
 
         Grid cur = findGrid(self.containerMenu);
         if (cur != null) {
@@ -174,13 +192,23 @@ public final class CraftOps {
                 BlockPos hintPos = BlockScanner.nearestBlock(level, self.blockPosition(),
                         self.getEyePosition(), HINT_H, HINT_V, Double.MAX_VALUE,
                         (pos, state) -> state.getBlock() instanceof CraftingTableBlock);
-                return TaskResult.fail(name + " is a 3x3 recipe — it needs a crafting table within reach "
-                        + "(~4 blocks). " + (hintPos != null
-                                ? "Nearest one is at " + hintPos.getX() + "," + hintPos.getY() + ","
-                                        + hintPos.getZ() + " — goto it, then craft again."
-                                : "None within " + HINT_H + " blocks — craft a crafting_table (4 planks, "
-                                        + "fits your own 2x2) and build it (op `set`), then craft "
-                                        + "again.")).toJson();
+                if (hintPos != null) {
+                    // 16 格以内就有台:走过去比花掉 8 块圆石划算(WorkstationPlan 的同一个门槛,
+                    // 见它类注释里对 HINT_H 的引用)。这一档仍然回话让模型走一趟。
+                    return TaskResult.fail(name + " is a 3x3 recipe — it needs a crafting table within "
+                            + "reach (~4 blocks). Nearest one is at " + hintPos.getX() + ","
+                            + hintPos.getY() + "," + hintPos.getZ() + " — goto it, then craft again.")
+                            .toJson();
+                }
+                // 十六格内一个台都没有:自己想办法(放下身上的 / 现造一个),而不是把活派回去。
+                Supply supply = supplyTable(self, level);
+                placedByMe = supply.placed();
+                if (supply.table() == null) {
+                    return TaskResult.fail(name + " is a 3x3 recipe — it needs a crafting table, and I"
+                            + " could not get one: " + supply.note()).toJson();
+                }
+                table = supply.table();
+                station = supply.note();
             }
             // 开台走 act 的按键原语:看向、右键、挥手都是身体动作,不归工具层手搓。
             // 预解析命中(不走射线)保持既有语义——门禁是"够得着",不是"看得见"。
@@ -197,8 +225,10 @@ public final class CraftOps {
             menu = self.containerMenu;
             grid = opened;
             openedTable = true;
-            station = "Used the crafting table at " + table.getX() + "," + table.getY() + ","
-                    + table.getZ() + ".";
+            if (placedByMe == null) {
+                station = "Used the crafting table at " + table.getX() + "," + table.getY() + ","
+                        + table.getZ() + ".";
+            }
         }
 
         try {
@@ -206,9 +236,172 @@ public final class CraftOps {
         } finally {
             sweepGrid(menu, self, grid);
             if (openedTable) {
-                self.closeContainer();
+                self.closeContainer();   // 先关台再拆,免得拆的瞬间还挂着一个开着的菜单
+            }
+            if (placedByMe != null) {
+                reclaimTable(self, level, placedByMe);
             }
         }
+    }
+
+    /** 弄一个工作台的结果:{@code table} 是要用的那一格(拿不到就是 null),{@code placed} 是她放下的那一格。 */
+    private record Supply(BlockPos table, BlockPos placed, String note) {}
+
+    /**
+     * 十六格内没有工作台时,她自己弄一个——照 {@link WorkstationPlan} 走:身上带着就放下,
+     * 料够(4 块木板,原木能先劈成木板)就现造一个。走不了这条路时,回话里带的是
+     * {@link WorkstationPlan.Plan#shortfall()} 那句具体缺口,不是「材料不足」。
+     *
+     * <p>调用点已经确认过 16 格内没有台,所以判据的 {@code nearestDistance} 给无穷远:
+     * 剩下的就是「带着成品」还是「现造一个」这两种。
+     */
+    private Supply supplyTable(NumenPlayer self, ServerLevel level) {
+        Inventory inv = self.getInventory();
+        WorkstationPlan.Stock stock = new WorkstationPlan.Stock(
+                PlayerInv.count(inv, Items.CRAFTING_TABLE), 0,
+                countMatching(inv, ItemTags.PLANKS), countMatching(inv, ItemTags.LOGS), 0,
+                freeSlots(inv));
+        WorkstationPlan.Plan plan = WorkstationPlan.plan(WorkstationPlan.Station.CRAFTING_TABLE,
+                false, false, Double.POSITIVE_INFINITY, stock);
+        if (plan.action() == WorkstationPlan.Action.TRAVEL_TO_FAR) {
+            return new Supply(null, null, plan.shortfall() + ".");
+        }
+        if (PlayerInv.count(inv, Items.CRAFTING_TABLE) <= 0) {
+            if (countMatching(inv, ItemTags.PLANKS) < WorkstationPlan.PLANKS_PER_TABLE) {
+                String plank = plankIdFor(level, inv);
+                if (plank == null) {
+                    return new Supply(null, null, "no planks on hand, and no log I know how to saw"
+                            + " into planks");
+                }
+                craft(plank, 1, self);   // 1 根原木 → 4 块木板,她自带 2x2 就能做
+            }
+            craft("minecraft:crafting_table", 1, self);
+            if (PlayerInv.count(inv, Items.CRAFTING_TABLE) <= 0) {
+                return new Supply(null, null, "crafting a crafting_table (4 planks) did not work out"
+                        + " — see the message above");
+            }
+        }
+        int slot = PlayerInv.findSlot(inv, Items.CRAFTING_TABLE);
+        if (slot < 0) {
+            return new Supply(null, null, "a crafting table should be in my pack but I cannot find"
+                    + " the slot");
+        }
+        self.holdInHand(slot);
+        BlockPos at = tableSpot(self);
+        if (at == null) {
+            return new Supply(null, null, "nowhere within reach to put a crafting table down (every"
+                    + " cell next to me is occupied)");
+        }
+        InputDriver.halt(self);
+        InputDriver.lookAt(self, Vec3.atCenterOf(at));
+        // 与 BoatCrossing#placeTable 同一手法:命中点合成在目标格自己身上,格内可替换时原版原地落位。
+        var result = self.gameMode.useItemOn(self, level, self.getMainHandItem(),
+                InteractionHand.MAIN_HAND,
+                new BlockHitResult(Vec3.atCenterOf(at), Direction.UP, at, false));
+        if (result.consumesAction()) {
+            self.swing(InteractionHand.MAIN_HAND);
+        }
+        // 右键被消费 ≠ 台子真的出现了:看世界再说话(BoatCrossing 在放船那一处踩过同一个坑)。
+        if (!(level.getBlockState(at).getBlock() instanceof CraftingTableBlock)) {
+            return new Supply(null, null, "right-clicked to place the crafting table but nothing"
+                    + " appeared at " + at.toShortString() + " — the cell is obstructed");
+        }
+        return new Supply(at, at, "crafted and placed my own crafting table at " + at.toShortString()
+                + " (I take it back when this craft is done).");
+    }
+
+    /**
+     * 用完把自己放的那个工作台收回来。三条闸门都在 {@link WorkstationPlan#mayReclaim}:
+     * 是她放的、那格里现在仍是工作台、背包还有格子。任何一条不满足就原样留着——
+     * <b>不动别人的台</b>这条没有例外。
+     */
+    private static void reclaimTable(NumenPlayer self, ServerLevel level, BlockPos pos) {
+        if (!(level.getBlockState(pos).getBlock() instanceof CraftingTableBlock)) {
+            return;   // 别人换过那一格:不是我的东西了,不碰
+        }
+        if (!WorkstationPlan.mayReclaim(true, true, freeSlots(self.getInventory()))) {
+            return;
+        }
+        if (!level.destroyBlock(pos, false)) {
+            return;
+        }
+        // 那格已经没了:顺手销掉主人建筑记录里可能残留的一条(与 mixin 拆方块时同一手法)。
+        OwnerBuildMemory.forget(level, pos);
+        ItemStack left = PlayerInv.add(self.getInventory(), new ItemStack(Items.CRAFTING_TABLE));
+        if (!left.isEmpty()) {
+            Block.popResource(level, pos, left);   // 真装不下就掉在原地,不凭空吞掉
+        }
+    }
+
+    /** 背包 36 格里符合某个物品标签的总数。 */
+    private static int countMatching(Inventory inv, net.minecraft.tags.TagKey<Item> tag) {
+        int n = 0;
+        int limit = Math.min(PlayerInv.BUILDABLE_SLOTS, inv.items.size());
+        for (int i = 0; i < limit; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && s.is(tag)) {
+                n += s.getCount();
+            }
+        }
+        return n;
+    }
+
+    /** 背包 36 格里的空格数(收回来的东西得有地方放)。 */
+    private static int freeSlots(Inventory inv) {
+        int n = 0;
+        int limit = Math.min(PlayerInv.BUILDABLE_SLOTS, inv.items.size());
+        for (int i = 0; i < limit; i++) {
+            if (inv.getItem(i).isEmpty()) {
+                n++;
+            }
+        }
+        return n;
+    }
+    
+    /**
+     * 她手里那根原木能出哪种木板:<b>问配方表</b>,不按名字猜(oak_log → oak_planks)。
+     * 模组的木头不一定守这个命名,而合成要的正是那块具体的木板物品——
+     * {@code BoatCrossing#household} 在盘木料家底时是同一个路数。
+     */
+    private static String plankIdFor(ServerLevel level, Inventory inv) {
+        for (CraftingRecipe cr : level.getRecipeManager().getAllRecipesFor(RecipeType.CRAFTING)) {
+            ItemStack out = cr.getResultItem(level.registryAccess());
+            if (out.isEmpty() || !out.is(ItemTags.PLANKS) || cr.getIngredients().size() != 1) {
+                continue;
+            }
+            Ingredient ing = cr.getIngredients().get(0);
+            int limit = Math.min(PlayerInv.BUILDABLE_SLOTS, inv.items.size());
+            for (int i = 0; i < limit; i++) {
+                ItemStack s = inv.getItem(i);
+                if (!s.isEmpty() && ing.test(s)) {
+                    return BuiltInRegistries.ITEM.getKey(out.getItem()).toString();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 放工作台的那一格:先身旁四格(平地),再头顶两格之外,最后与她脚下一层平齐的侧面
+     * (斜坡、台阶边)。<b>不放她自己身体占的那一格。</b>与 {@code BoatCrossing#tableSpot} 同一口径。
+     */
+    private static BlockPos tableSpot(NumenPlayer self) {
+        Level level = self.level();
+        BlockPos feet = self.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (Direction d : Direction.Plane.HORIZONTAL) {
+            candidates.add(feet.relative(d));
+        }
+        candidates.add(feet.above(2));
+        for (Direction d : Direction.Plane.HORIZONTAL) {
+            candidates.add(feet.below().relative(d));
+        }
+        for (BlockPos p : candidates) {
+            if (level.getBlockState(p).canBeReplaced()) {
+                return p;
+            }
+        }
+        return null;
     }
 
     // ---- the fill / take loop ----

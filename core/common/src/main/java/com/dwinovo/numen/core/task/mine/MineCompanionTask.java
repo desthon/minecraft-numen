@@ -146,6 +146,14 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      * 任务才生效。每刻去问注册表既慢又会让同一趟任务的候选集合飘。
      */
     private Set<Block> bonus = Set.of();
+
+    /**
+     * 燃料见底时自动加进来的煤矿(见 {@link com.dwinovo.numen.core.act.FuelSearch})。
+     *
+     * <p>它与 {@link #bonus} 分开存,只因为半径不同:普通顺路矿是 24 格,煤是 48 格。
+     * 两者都<b>只是顺路</b>——排在任务点名的方块后面,永远不改派这一趟。
+     */
+    private Set<Block> fuelOres = Set.of();
     /**
      * 当前地形下挖不动的格子 —— <b>只有 {@code NO_SHOT} 进得来</b>:够到测试过了,却连续
      * 二十刻拉不出射线(瞄准量化、站位上方有个檐口)。这是关于<b>这一格</b>的、可复现的事实。
@@ -247,6 +255,11 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         // 覆盖完整前 onTick 的终局判定会等着(lastQueryComplete)。
         // 顺路挖的矿也要进索引:索引按方块类型建表,不登记就永远查不到它们。
         bonus = com.dwinovo.numen.core.task.mine.BonusOres.of(player);
+        // 燃料见底就把煤自动挂进这一趟:主人要的「燃料不够应当顺路挖煤」不能等模型想起来。
+        // 这是 FuelSearch 三级分界里的 ON_THE_WAY(挖矿本来就正在进行,所以不是专程那一档);
+        // 燃料够用时一个都不挂,免得每趟挖矿都在索引里多背两种方块。
+        fuelOres = com.dwinovo.numen.core.act.FuelSearch.fuelShort(fuelStock())
+                ? coalOreBlocks() : Set.of();
         if (player.level() instanceof ServerLevel sl) {
             TargetIndex.register(sl, queryTargets());
         }
@@ -955,14 +968,36 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         mergeHits(res.hits());
     }
 
-    /** 查询与索引要认的方块集合:任务点名的 + 主人配的顺路矿。 */
+    /** 查询与索引要认的方块集合:任务点名的 + 主人配的顺路矿 + 燃料见底时的煤矿。 */
     private Set<Block> queryTargets() {
-        if (bonus.isEmpty()) {
+        if (bonus.isEmpty() && fuelOres.isEmpty()) {
             return r.targets;
         }
         Set<Block> union = new java.util.HashSet<>(r.targets);
         union.addAll(bonus);
+        union.addAll(fuelOres);
         return union;
+    }
+
+    /** 背包 36 格折成燃料判据要的家底(顺路挖煤的触发条件用它)。 */
+    private List<com.dwinovo.numen.core.act.FuelRank.Stack> fuelStock() {
+        return com.dwinovo.numen.core.PlayerInv.fuelStacks(player.getInventory());
+    }
+
+    /** {@code FuelSearch.mineIds()} 里的 id 解析成方块;认不出的直接丢掉(不引新依赖,只查注册表)。 */
+    private static Set<Block> coalOreBlocks() {
+        Set<Block> out = new HashSet<>();
+        for (String id : com.dwinovo.numen.core.act.FuelSearch.mineIds()) {
+            net.minecraft.resources.ResourceLocation rl = net.minecraft.resources.ResourceLocation.tryParse(id);
+            if (rl == null) {
+                continue;
+            }
+            Block b = net.minecraft.core.registries.BuiltInRegistries.BLOCK.get(rl);
+            if (b != null && b != net.minecraft.world.level.block.Blocks.AIR) {
+                out.add(b);
+            }
+        }
+        return Set.copyOf(out);
     }
 
     /**
@@ -970,14 +1005,22 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *
      * <p>"顺路"是个距离概念:二十四格外的钻石不叫路过,那是一次专门绕行,该由模型另外派一个
      * 任务去做。同一个判据也让"顺路"永远不会变成"改派"。
+     *
+     * <p>煤走同一条规矩,只是燃料见底时半径放宽到 48 格(见
+     * {@link com.dwinovo.numen.core.act.FuelSearch#SHORT_ON_FUEL_RADIUS})——放宽的只是距离,
+     * 它仍然排在点名方块后面,也仍然进不了 {@link #r} 的进度口径。
      */
     private boolean wantedHere(BlockState state, BlockPos p) {
         if (r.targets.contains(state.getBlock())) {
             return true;
         }
+        double far = player.blockPosition().distSqr(p);
+        if (!fuelOres.isEmpty() && fuelOres.contains(state.getBlock())) {
+            double r = com.dwinovo.numen.core.act.FuelSearch.SHORT_ON_FUEL_RADIUS;
+            return far <= r * r;
+        }
         return bonus.contains(state.getBlock())
-                && player.blockPosition().distSqr(p)
-                <= com.dwinovo.numen.core.task.mine.BonusOres.ADMIT_RADIUS
+                && far <= com.dwinovo.numen.core.task.mine.BonusOres.ADMIT_RADIUS
                         * com.dwinovo.numen.core.task.mine.BonusOres.ADMIT_RADIUS;
     }
 

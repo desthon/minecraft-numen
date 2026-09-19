@@ -1,8 +1,13 @@
 package com.dwinovo.numen.core;
 
+import com.dwinovo.numen.core.act.FuelRank;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Small adapter giving the companion task layer the {@code SimpleContainer}-style
@@ -60,6 +65,27 @@ public final class PlayerInv {
             if (!s.isEmpty() && s.is(item)) n += s.getCount();
         }
         return n;
+    }
+
+    /**
+     * 背包 36 格折成燃料判据要的叠列表——{@link FuelRank} 的世界适配层,判据本身仍是纯的。
+     *
+     * <p>口径与 {@link #carriedCount} 一致:只数快捷栏 + 主背包。穿在身上的盔甲和副手握着
+     * 的东西不是柴,也不该被 {@code FuelSearch} 算成家底。物品按注册名取值(不带命名空间),
+     * 因为 {@link FuelRank} 的表就是照原版注册名建的,这样它在没有注册表的单测里也能跑。
+     */
+    public static List<FuelRank.Stack> fuelStacks(Inventory inv) {
+        List<FuelRank.Stack> out = new ArrayList<>();
+        int limit = Math.min(BUILDABLE_SLOTS, inv.items.size());
+        for (int i = 0; i < limit; i++) {
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty()) {
+                continue;
+            }
+            out.add(new FuelRank.Stack(i,
+                    BuiltInRegistries.ITEM.getKey(s.getItem()).getPath(), s.getCount()));
+        }
+        return out;
     }
 
     /** First slot holding {@code item}, or -1. */

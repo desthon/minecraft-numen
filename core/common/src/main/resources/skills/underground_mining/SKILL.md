@@ -93,6 +93,23 @@ bonus_ores action=add block_ids=[minecraft:diamond_ore, minecraft:deepslate_diam
 It never changes the job you were given, and it cannot make you able to mine something - the reply
 reports `not_harvestable_with_current_tool`, meaning "fetch the right pickaxe first".
 
+## Coal is furnace fuel, not just torch stock
+
+Coal and charcoal are **the** furnace fuel: 1 smelts 8 items. Logs and planks are building material
+- a log is 4 planks - so they are never the answer to "I need fuel". Three distances, three
+behaviours, and the line between them is deliberate:
+
+| how far | when | what happens |
+|---|---|---|
+| **24 blocks** | any ore on your `bonus_ores` list, any trip | taken in passing, always after the blocks you were actually asked for |
+| **48 blocks** | your fuel is low (under 8 coal-equivalents) and you are already mining | coal ore is added to that trip automatically - you do not have to remember it |
+| **no limit** | you are out of fuel and no mining trip is running | a dedicated run: `mine([minecraft:coal_ore, minecraft:deepslate_coal_ore], N)` |
+
+1 coal ore drops exactly 1 coal (Fortune can add more), so N coal ore = N coal. `mine` only digs the
+block ids you name, so always give **both** `coal_ore` and `deepslate_coal_ore` - deepslate starts
+at Y 0 and is the only one left once you are deep. The 48-block tier means the *distance* loosens
+when fuel is short; it never turns into a re-tasking of the trip you were sent on.
+
 ## Packlist before descending
 
 | item | why |

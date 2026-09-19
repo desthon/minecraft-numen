@@ -43,7 +43,10 @@ public final class BonusOresTool implements NumenTool {
                 + "first; (3) it is not /mine everything/: an empty list is a real choice and means you "
                 + "mine nothing on the way. Block ids or #tags both work, e.g. "
                 + "[minecraft:diamond_ore, #minecraft:iron_ores]. Tell the owner what you set — it "
-                + "changes how much you come home with.";
+                + "changes how much you come home with. NOTE: coal does not need to be on this list. "
+                + "When your fuel is low (under 8 coal-equivalents) coal ore is added to any mining "
+                + "trip automatically, at a wider 48 blocks, and when you are out of fuel with no "
+                + "trip running the fuel judge tells you to run a dedicated mine instead.";
     }
 
     @Override

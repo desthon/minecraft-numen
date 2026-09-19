@@ -28,19 +28,29 @@ public final class TransferTool implements NumenTool {
     public String description() {
         return "Transfer items between slots in the GUI you have open — reorganize, load a machine, "
                 + "deposit or take. Pass `moves` as a LIST; they run in order, so do the whole job in one "
-                + "call. inspect_gui first for slot indices.";
+                + "call. inspect_gui first for slot indices. To FUEL a furnace do NOT pick the fuel "
+                + "yourself: pass {fuel: true} and the fuel judge chooses (coal/charcoal first, "
+                + "logs/planks only as a last resort because they are building material).";
     }
 
     @Override
     public Map<String, Object> parameterSchema() {
         return Schema.object()
                 .objectArray("moves", "Transfers to run in order (one whole job per call).", item -> item
-                        .integer("from", "Source slot index (from inspect_gui).")
+                        .optionalInteger("from", "Source slot index (from inspect_gui). Required unless "
+                                + "fuel:true.", 0, 255)
                         .nullableInteger("to", "Destination slot. OMIT to route the stack to the other section "
                                 + "(deposit/take/feed). Give a slot to place exactly there (empty=move, same "
                                 + "item=merge, different item=swap).")
                         .nullableInteger("count", "Exact number to move (needs `to`; default = the whole stack). "
-                                + "Ignored when `to` is omitted — routing moves the whole stack."))
+                                + "Ignored when `to` is omitted — routing moves the whole stack. With fuel:true "
+                                + "it means how many ITEMS you are about to smelt, which only helps pick the "
+                                + "right fuel stack (a 1-coal stack over a 64-charcoal one).")
+                        .optionalBool("fuel", "Fuel the furnace for me: pick the best fuel out of your 36 "
+                                + "backpack slots and route it into the fuel slot. Pass no `from`/`to`. "
+                                + "Preference: coal/charcoal, then real fuels, then scrap, then wooden "
+                                + "furniture, and logs/planks only as a last resort — they are building "
+                                + "material. The reply says which stack was chosen and why."))
                 .build();
     }
 

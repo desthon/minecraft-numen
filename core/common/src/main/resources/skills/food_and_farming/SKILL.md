@@ -38,7 +38,8 @@ from, and why it is not optional.
 - **Golden carrot is the best stackable food** - 14.4 saturation, and it needs no cooking (8 gold
   nuggets + 1 carrot).
 - **Cook raw meat always.** Raw meat barely heals; cooked is the staple. One coal smelts 8 items,
-  and a smoker finishes food in about half the time.
+  and a smoker finishes food in about half the time. Fuel the furnace with `transfer {fuel:true}` —
+  coal/charcoal first; logs/planks are building material and only burn as a last resort.
 - Do not eat a snack onto a full bar - saturation above the cap is simply lost (the wiki's own
   example: eating a golden carrot at high hunger wastes part of it).
 - Avoid rotten flesh (80% chance of the Hunger effect) and raw chicken (30%). Emergency only.
@@ -107,7 +108,10 @@ nearby, harvest it before you dig a farm.
 - Furnace or smoker: `interact_at` it, `transfer` the raw food in (no `to` - the menu routes it to
   the input slot) plus fuel below, then `set_timer` and collect the output. Exact slot mechanics:
   `containers`.
-- Fuel: 1 coal = 8 items; charcoal from logs is the same; a smoker is roughly twice as fast for food.
+- Fuel: 1 coal = 8 items; charcoal is identical. Load it with `transfer moves=[{fuel:true, count:N}]`
+  and let the fuel judge pick — coal/charcoal first, logs/planks last (they are your building and
+  crafting stock). No coal and no charcoal? Go mine coal rather than feeding the furnace planks.
+  A smoker is roughly twice as fast for food.
 - **Standing rule: never leave the base with fewer than 32 cooked food.** The Nether and the End
   trips want 64. Re-read `get_self_status` before a long `goto`.
 
