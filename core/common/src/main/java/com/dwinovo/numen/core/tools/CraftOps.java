@@ -259,15 +259,15 @@ public final class CraftOps {
         Inventory inv = self.getInventory();
         WorkstationPlan.Stock stock = new WorkstationPlan.Stock(
                 PlayerInv.count(inv, Items.CRAFTING_TABLE), 0,
-                countMatching(inv, ItemTags.PLANKS), countMatching(inv, ItemTags.LOGS), 0,
-                freeSlots(inv));
+                PlayerInv.countTag(inv, ItemTags.PLANKS), PlayerInv.countTag(inv, ItemTags.LOGS), 0,
+                PlayerInv.freeSlots(inv));
         WorkstationPlan.Plan plan = WorkstationPlan.plan(WorkstationPlan.Station.CRAFTING_TABLE,
                 false, false, Double.POSITIVE_INFINITY, stock);
         if (plan.action() == WorkstationPlan.Action.TRAVEL_TO_FAR) {
             return new Supply(null, null, plan.shortfall() + ".");
         }
         if (PlayerInv.count(inv, Items.CRAFTING_TABLE) <= 0) {
-            if (countMatching(inv, ItemTags.PLANKS) < WorkstationPlan.PLANKS_PER_TABLE) {
+            if (PlayerInv.countTag(inv, ItemTags.PLANKS) < WorkstationPlan.PLANKS_PER_TABLE) {
                 String plank = plankIdFor(level, inv);
                 if (plank == null) {
                     return new Supply(null, null, "no planks on hand, and no log I know how to saw"
@@ -281,25 +281,14 @@ public final class CraftOps {
                         + " — see the message above");
             }
         }
-        int slot = PlayerInv.findSlot(inv, Items.CRAFTING_TABLE);
-        if (slot < 0) {
+        if (PlayerInv.findSlot(inv, Items.CRAFTING_TABLE) < 0) {
             return new Supply(null, null, "a crafting table should be in my pack but I cannot find"
                     + " the slot");
         }
-        self.holdInHand(slot);
-        BlockPos at = tableSpot(self);
+        BlockPos at = placeHeld(self, level, Items.CRAFTING_TABLE);
         if (at == null) {
             return new Supply(null, null, "nowhere within reach to put a crafting table down (every"
                     + " cell next to me is occupied)");
-        }
-        InputDriver.halt(self);
-        InputDriver.lookAt(self, Vec3.atCenterOf(at));
-        // 与 BoatCrossing#placeTable 同一手法:命中点合成在目标格自己身上,格内可替换时原版原地落位。
-        var result = self.gameMode.useItemOn(self, level, self.getMainHandItem(),
-                InteractionHand.MAIN_HAND,
-                new BlockHitResult(Vec3.atCenterOf(at), Direction.UP, at, false));
-        if (result.consumesAction()) {
-            self.swing(InteractionHand.MAIN_HAND);
         }
         // 右键被消费 ≠ 台子真的出现了:看世界再说话(BoatCrossing 在放船那一处踩过同一个坑)。
         if (!(level.getBlockState(at).getBlock() instanceof CraftingTableBlock)) {
@@ -319,7 +308,7 @@ public final class CraftOps {
         if (!(level.getBlockState(pos).getBlock() instanceof CraftingTableBlock)) {
             return;   // 别人换过那一格:不是我的东西了,不碰
         }
-        if (!WorkstationPlan.mayReclaim(true, true, freeSlots(self.getInventory()))) {
+        if (!WorkstationPlan.mayReclaim(true, true, PlayerInv.freeSlots(self.getInventory()))) {
             return;
         }
         if (!level.destroyBlock(pos, false)) {
@@ -333,31 +322,35 @@ public final class CraftOps {
         }
     }
 
-    /** 背包 36 格里符合某个物品标签的总数。 */
-    private static int countMatching(Inventory inv, net.minecraft.tags.TagKey<Item> tag) {
-        int n = 0;
-        int limit = Math.min(PlayerInv.BUILDABLE_SLOTS, inv.items.size());
-        for (int i = 0; i < limit; i++) {
-            ItemStack s = inv.getItem(i);
-            if (!s.isEmpty() && s.is(tag)) {
-                n += s.getCount();
-            }
+    /**
+     * 把背包里的一个方块放在她身旁,返回它落地的那一格;背包里没有、或近旁没有可放的位置时返回
+     * {@code null}。
+     *
+     * <p>与 {@code BoatCrossing#placeTable} 同一手法:命中点合成在目标格自己身上,格内可替换时
+     * 原版原地落位。但<b>右键被消费 ≠ 方块真的出现了</b>,所以这里只按下右键并交出所瞄的那一格——
+     * 回读世界是调用方的事(craft 造工作台、smelt 造熔炉共用这一份,免得两处各抄一遍站位与瞄法)。
+     */
+    public static BlockPos placeHeld(NumenPlayer self, ServerLevel level, Item item) {
+        int slot = PlayerInv.findSlot(self.getInventory(), item);
+        if (slot < 0) {
+            return null;
         }
-        return n;
+        self.holdInHand(slot);
+        BlockPos at = tableSpot(self);
+        if (at == null) {
+            return null;
+        }
+        InputDriver.halt(self);
+        InputDriver.lookAt(self, Vec3.atCenterOf(at));
+        var result = self.gameMode.useItemOn(self, level, self.getMainHandItem(),
+                InteractionHand.MAIN_HAND,
+                new BlockHitResult(Vec3.atCenterOf(at), Direction.UP, at, false));
+        if (result.consumesAction()) {
+            self.swing(InteractionHand.MAIN_HAND);
+        }
+        return at;
     }
 
-    /** 背包 36 格里的空格数(收回来的东西得有地方放)。 */
-    private static int freeSlots(Inventory inv) {
-        int n = 0;
-        int limit = Math.min(PlayerInv.BUILDABLE_SLOTS, inv.items.size());
-        for (int i = 0; i < limit; i++) {
-            if (inv.getItem(i).isEmpty()) {
-                n++;
-            }
-        }
-        return n;
-    }
-    
     /**
      * 她手里那根原木能出哪种木板:<b>问配方表</b>,不按名字猜(oak_log → oak_planks)。
      * 模组的木头不一定守这个命名,而合成要的正是那块具体的木板物品——

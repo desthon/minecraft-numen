@@ -1,6 +1,6 @@
 ---
 name: containers
-description: How to move items in/out of any container or machine GUI — chest, barrel, shulker, furnace, modded machine. The open → inspect_gui → transfer → close_gui loop, depositing/taking/swapping with the transfer tool, crafting by laying a recipe into the grid with transfer, smelting by loading a furnace, and error recovery.
+description: How to move items in/out of any container or machine GUI — chest, barrel, shulker, furnace, modded machine. The open → inspect_gui → transfer → close_gui loop, depositing/taking/swapping with the transfer tool, crafting by laying a recipe into the grid with transfer, smelting with the smelt tool (or by loading a furnace by hand), and error recovery.
 ---
 
 # Skill: containers
@@ -68,7 +68,33 @@ You craft by laying the recipe into a grid yourself with `transfer`, then taking
 
 ## Smelting
 
-Smelting is NOT crafting — there's no auto-tool, you load the furnace yourself (it's just two slots):
+**Use the `smelt` tool — it does the whole batch itself:**
+
+```
+smelt(item_id="minecraft:raw_iron", count=10)
+```
+
+You give it an item and a count; you do NOT need coordinates, a furnace, or fuel in hand. It finds a
+furnace within ~16 blocks (or **builds one**: 8 cobblestone / blackstone / cobbled deepslate in a 3×3,
+plus the crafting table that recipe needs — it supplies that itself and takes it back), puts it down,
+loads the input and the fuel, watches the furnace's real state until the product comes out, takes the
+product, and **takes back the furnace it placed** (one it merely found is never touched). It uses a
+blast furnace / smoker when that is what is near — it checks which recipes that station actually owns,
+so it will not put iron in a smoker.
+
+Fuel is its business, and it is the same rule as below: coal/charcoal first (1 smelts 8 items, so
+~⌈N/8⌉), then real fuels (coal block, blaze rod, dried kelp block, lava bucket), then scrap (sticks,
+saplings, wooden tools), then wooden furniture — and **logs/planks are building material, never
+quietly burnt**. If real fuel is short, the reply says exactly how much is missing and hands you the
+`mine([minecraft:coal_ore, minecraft:deepslate_coal_ore], N)` run to fix it: do that, do not feed it
+planks.
+
+`count` is items and caps at 64 (one input stack) — smelt more by calling it again. It reports on
+`task_status` and ends with a `task_finished` event: no polling. The body is busy while it smelts
+(~10 s per item, so a full stack is ~10 minutes), so don't queue other body work behind it.
+
+**Doing it by hand** — only when no furnace the tool can drive is available (a modded machine, or you
+want to leave a batch cooking while you go elsewhere):
   1. `interact_at button=right` the furnace / blast furnace / smoker.
   2. Load the input: `transfer moves=[{from:<raw item>}]` — omit `to`, the menu routes it to the top input slot.
   3. Add fuel: `transfer moves=[{fuel:true, count:<N>}]` — **do not pick the fuel yourself.** Pass no `from`/`to`: a judge ranks your 36 backpack slots and routes the winner into the fuel slot, and the reply names the stack it chose and why. The order is **coal / charcoal first** (1 smelts 8 items, so ~⌈N/8⌉), then real fuels (coal block, blaze rod, dried kelp block, lava bucket), then scrap (sticks, saplings, wooden tools), then wooden furniture — and **logs/planks only as a last resort, because they are building material**: a log is 4 planks, and planks are your crafting stock. If the reply says it had to burn timber, read that as "go mine coal", not as normal.

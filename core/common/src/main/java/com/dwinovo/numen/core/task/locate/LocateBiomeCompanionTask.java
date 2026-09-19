@@ -1,4 +1,5 @@
 package com.dwinovo.numen.core.task.locate;
+import com.dwinovo.numen.core.Constants;
 import com.dwinovo.numen.core.task.IdSuggest;
 import com.dwinovo.numen.core.task.CompassUtil;
 import com.dwinovo.numen.core.scan.SearchBudget;
@@ -48,17 +49,35 @@ import java.util.function.Predicate;
  * </ul>
  * Coverage: {@value #SEARCH_RADIUS_RINGS} rings × {@value #SAMPLE_STEP_BLOCKS}
  * blocks = 6400 blocks, exactly vanilla /locate biome's radius; NC's default
- * reach is 10k with the same 64-block grid. Worst-case full miss ≈ 40k samples
- * ≈ 160 budgeted ticks ≈ 8s, far under the task deadline.
+ * reach is 10k with the same 64-block grid.
+ *
+ * <h2>为什么这里不需要结构定位那套轮转</h2>
+ * 结构定位要按环轮转,是因为一条 {@code #tag} 会摊成多条候选流(多个 placement),
+ * 谁先谁后会决定"近的那个有没有机会被查到";生物群系定位只有<b>一条</b>候选流
+ * (一张采样的环螺旋),环序本身就是由近及远,不存在"第一条流吃光预算、第二条流挨饿"。
+ * 代价也小得多:一轮 20,201 个采样点在 {@link SearchBudget} 的 256/刻下约 79 刻(≈4 秒),
+ * 本来就落在"人还能等"的量级里。
+ *
+ * <p>所以这里与结构定位共享的是<b>回话形状</b>而不是搜索形状:同样的刻数硬上限、
+ * 同样把真实数字(采样了多少列、扫到第几环、覆盖多少格、花了多少刻)写进回执,以及同样一行
+ * {@code [numen-locate]} 日志。
  */
 public final class LocateBiomeCompanionTask extends AbstractCompanionTask<LocateBiomeTaskRecord> {
 
-    /** Sample grid pitch — NC's default (16 × biome size 4). Vanilla /locate uses 32. */
-    private static final int SAMPLE_STEP_BLOCKS = 64;
+    /** Sample grid pitch — NC's default (16 × biome size 4). Vanilla /locate uses 32.(包内可见,单测钉住 6400) */
+    static final int SAMPLE_STEP_BLOCKS = 64;
     /** Rings of samples; 100 × 64 = 6400 blocks, vanilla /locate biome's radius. */
-    private static final int SEARCH_RADIUS_RINGS = 100;
+    static final int SEARCH_RADIUS_RINGS = 100;
     /** Vertical probe pitch within a sample column (NC uses the same 64). */
     private static final int Y_STEP_BLOCKS = 64;
+
+    /**
+     * 每次调用的刻数硬上限,与 {@link LocateStructureCompanionTask#TICK_LIMIT} 同一个依据:
+     * 工具是 {@code runSync},模型的一整个回合挂在上面,所以按"人还能等"定。
+     * 100 刻 = 5 秒。一轮采样本来只要约 79 刻,这个上限平时碰不到;它防的是预算被别的
+     * 并发搜索挤干、或者生物群系查询比预期慢时的沉默。
+     */
+    static final int TICK_LIMIT = 100;
 
     private Predicate<Holder<Biome>> match;
     private BiomeSource biomeSource;
@@ -68,6 +87,9 @@ public final class LocateBiomeCompanionTask extends AbstractCompanionTask<Locate
     private int ring, perimIdx;
     private boolean exhausted;
     private BlockPos best;
+    private long samples;
+    private long ticks;
+    private boolean capped;
     private String failReason = "not on a server level";
 
     public LocateBiomeCompanionTask(NumenPlayer player, LocateBiomeTaskRecord record) {
@@ -81,6 +103,9 @@ public final class LocateBiomeCompanionTask extends AbstractCompanionTask<Locate
         ring = 0;
         perimIdx = 0;
         exhausted = false;
+        samples = 0;
+        ticks = 0;
+        capped = false;
 
         if (!(player.level() instanceof ServerLevel sl)) {
             fail("not on a server level", FailureType.UNKNOWN);
@@ -156,10 +181,15 @@ public final class LocateBiomeCompanionTask extends AbstractCompanionTask<Locate
             fail("not on a server level", FailureType.UNKNOWN);
             return TaskState.FAILED;
         }
+        ticks++;
         SearchBudget.refresh(sl.getServer());
         while (true) {
             if (exhausted) {
-                return TaskState.SUCCESS;   // best == null → "not found"
+                return finish();             // best == null → "not found"
+            }
+            if (ticks > TICK_LIMIT) {
+                capped = true;               // 预算被挤干/查询变慢:如实回话,不沉默到 deadline
+                return finish();
             }
             if (!SearchBudget.tryBiomeSample()) {
                 return TaskState.RUNNING;    // pool drained — resume next tick
@@ -167,7 +197,7 @@ public final class LocateBiomeCompanionTask extends AbstractCompanionTask<Locate
             BlockPos hit = sampleNext();
             if (hit != null) {
                 best = hit;                  // ring order ⇒ first hit ≈ nearest
-                return TaskState.SUCCESS;
+                return finish();
             }
         }
     }
@@ -184,6 +214,7 @@ public final class LocateBiomeCompanionTask extends AbstractCompanionTask<Locate
             }
         }
         int[] d = RingSpiral.offset(ring, perimIdx++);
+        samples++;
         int x = centerX + d[0] * SAMPLE_STEP_BLOCKS;
         int z = centerZ + d[1] * SAMPLE_STEP_BLOCKS;
         int qx = QuartPos.fromBlock(x);
@@ -195,6 +226,36 @@ public final class LocateBiomeCompanionTask extends AbstractCompanionTask<Locate
             }
         }
         return null;
+    }
+
+    private TaskState finish() {
+        String stop = capped ? "per-call cap (" + TICK_LIMIT + " ticks)"
+                : best != null ? "first hit in ring order"
+                : "covered the whole radius";
+        logFinish(stop);
+        return TaskState.SUCCESS;
+    }
+
+    /** 每次定位一行日志:找什么、采样多少列、扫到第几环/覆盖多远、花多少刻、怎么收场。 */
+    private void logFinish(String stop) {
+        LocateReport.Progress p = progress();
+        String hit = best == null ? null : best.getX() + "," + best.getY() + "," + best.getZ();
+        Constants.LOG.info(LocateReport.logLine("biome", p, stop, hit));
+    }
+
+    /** 已经整环走完的圈数:当前环号;走满或截断时夹到上限。 */
+    private int ringsSwept() {
+        return Math.min(ring, SEARCH_RADIUS_RINGS);
+    }
+
+    private LocateReport.Progress progress() {
+        return new LocateReport.Progress(r.biome, dimensionName(), 1, samples,
+                ringsSwept(), SEARCH_RADIUS_RINGS, ringsSwept() * SAMPLE_STEP_BLOCKS,
+                ticks, TICK_LIMIT, exhausted && !capped);
+    }
+
+    private String dimensionName() {
+        return player.level().dimension().location().getPath();
     }
 
     /** Search tasks paint no path overlay — nothing to release. */
@@ -219,37 +280,45 @@ public final class LocateBiomeCompanionTask extends AbstractCompanionTask<Locate
         } else {
             data.put("found", false);
         }
+        // 搜到哪的账本,和结构定位同一套字段名
+        LocateReport.Progress p = progress();
+        data.put("complete", exhausted && !capped);
+        data.put("candidates_checked", samples);
+        data.put("rings_swept", p.ringsDone());
+        data.put("radius_covered", p.coveredBlocks());
+        data.put("search_ticks", ticks);
         return data;
     }
 
     @Override
     protected String successMessage() {
+        LocateReport.Progress p = progress();
         if (best != null) {
             BlockPos me = player.blockPosition();
             int dx = best.getX() - me.getX();
             int dz = best.getZ() - me.getZ();
             int dist = (int) Math.sqrt((double) dx * dx + (double) dz * dz);
-            String dir = CompassUtil.compass(dx, dz);
-            return "nearest " + r.biome + " around " + best.getX() + ","
-                    + best.getY() + "," + best.getZ() + " (" + dir + ", ~" + dist
-                    + " blocks; accurate to ~" + SAMPLE_STEP_BLOCKS + "). goto the "
-                    + "x/z (pick a sensible y for the terrain), then confirm with "
-                    + "scan_blocks or scan_nearby_entities.";
+            return LocateReport.found("biome", p, best.getX(), best.getY(), best.getZ(),
+                    CompassUtil.compass(dx, dz), dist,
+                    "accurate to ~" + SAMPLE_STEP_BLOCKS + " blocks — goto the x/z (pick a "
+                            + "sensible y), then confirm with scan_blocks or "
+                            + "scan_nearby_entities.");
         }
-        String dim = player.level().dimension().location().getPath();
-        int searched = Math.min(ring, SEARCH_RADIUS_RINGS) * SAMPLE_STEP_BLOCKS;
-        return "no " + r.biome + " within ~" + searched
-                + " blocks IN THIS DIMENSION (" + dim + ") — check the biome's "
-                + "home dimension (warped_forest/soul_sand_valley: nether; most "
-                + "others: overworld) or travel a few thousand blocks and retry";
+        return LocateReport.notFound("biome", p, capped
+                ? "ask again to keep sweeping, or travel a few hundred blocks first."
+                : "check the biome's home dimension (warped_forest/soul_sand_valley: nether; "
+                        + "most others: overworld) or travel a few thousand blocks and retry.");
     }
 
     @Override
     protected String timeoutMessage() {
-        int searched = Math.min(ring, SEARCH_RADIUS_RINGS) * SAMPLE_STEP_BLOCKS;
-        return "biome search deadline hit after ~"
-                + searched + " blocks with no " + r.biome
-                + " — retrying immediately is fine, or travel first";
+        LocateReport.Progress p = progress();
+        LocateReport.Progress cut = new LocateReport.Progress(p.target(), p.dimension(), p.streams(),
+                p.candidates(), p.ringsDone(), p.ringsMax(), p.coveredBlocks(), p.ticks(),
+                p.ticksMax(), false);
+        logFinish("framework deadline");
+        return "the tool deadline hit before I finished — "
+                + LocateReport.notFound("biome", cut, "Retrying is fine; travel first if you can.");
     }
 
     @Override

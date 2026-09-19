@@ -149,6 +149,9 @@ public final class NumenCore {
         // 飞行(创造档的直线飞过去)。登记在末尾而不是插在 goto 旁边:工具顺序是上游
         // prompt 缓存的键,插队会让所有既有工具的缓存失效一次。
         ToolRegistry.register(new com.dwinovo.numen.core.tools.work.FlyTool());
+        // 熔炼的自主化。同样登记在末尾而不是插到 craft 旁边:工具顺序是上游 prompt 缓存的键,
+        // 插队会让所有既有工具的缓存失效一次——这一条的代价不值得。
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.inventory.SmeltTool());
     }
 
 
@@ -164,6 +167,10 @@ public final class NumenCore {
         TaskFactory.register(EatItemTaskRecord.class, (p, r) -> new EatCompanionTask(p, r));
         TaskFactory.register(AttackTaskRecord.class, (p, r) -> new AttackCompanionTask(p, r));
         TaskFactory.register(CollectItemsTaskRecord.class, (p, r) -> new CollectItemsCompanionTask(p, r));
+        // smelt:熔炉的自主化(找/造炉子 → 装柴装料 → 盯着产物 → 收回自己放的炉子)。
+        // 判据是 act 里的 SmeltPlan/FuelRank/WorkstationPlan,任务层只做推进与收尾。
+        TaskFactory.register(com.dwinovo.numen.core.task.smelt.SmeltTaskRecord.class,
+                (p, r) -> new com.dwinovo.numen.core.task.smelt.SmeltCompanionTask(p, r));
         TaskFactory.register(FishTaskRecord.class, (p, r) -> new FishCompanionTask(p, r));
         TaskFactory.register(BuildTaskRecord.class, (p, r) -> new BuildCompanionTask(p, r));
         TaskFactory.register(InteractAtTaskRecord.class, (p, r) -> new InteractAtCompanionTask(p, r));

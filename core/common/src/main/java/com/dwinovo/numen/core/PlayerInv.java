@@ -2,6 +2,7 @@ package com.dwinovo.numen.core;
 
 import com.dwinovo.numen.core.act.FuelRank;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.tags.TagKey;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -86,6 +87,36 @@ public final class PlayerInv {
                     BuiltInRegistries.ITEM.getKey(s.getItem()).getPath(), s.getCount()));
         }
         return out;
+    }
+
+    /**
+     * 背包 36 格里符合某个物品标签的总数。
+     *
+     * <p>口径与 {@link #buildableCount} 一致(快捷栏 + 主背包,不含盔甲与副手)。craft 与 smelt
+     * 盘木料家底时共用这一份——两处各数一次,就会在两处各错一次。
+     */
+    public static int countTag(Inventory inv, TagKey<Item> tag) {
+        int n = 0;
+        int limit = Math.min(BUILDABLE_SLOTS, inv.items.size());
+        for (int i = 0; i < limit; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && s.is(tag)) {
+                n += s.getCount();
+            }
+        }
+        return n;
+    }
+
+    /** 背包 36 格里的空格数(收回来的工作台/熔炉得有地方放)。 */
+    public static int freeSlots(Inventory inv) {
+        int n = 0;
+        int limit = Math.min(BUILDABLE_SLOTS, inv.items.size());
+        for (int i = 0; i < limit; i++) {
+            if (inv.getItem(i).isEmpty()) {
+                n++;
+            }
+        }
+        return n;
     }
 
     /** First slot holding {@code item}, or -1. */

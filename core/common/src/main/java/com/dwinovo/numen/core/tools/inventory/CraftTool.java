@@ -32,8 +32,9 @@ public final class CraftTool implements NumenTool {
                 + "one (4 planks; logs get sawn first), uses it and takes it back when the craft is done. It only "
                 + "sends you walking when a table stands within ~16 blocks. Missing materials come back as exact "
                 + "shortfalls to collect first; it still crafts up to `count` of the item and stops early if "
-                + "inventory fills. Only for [crafting] recipes — smelting/stonecutter/smithing still "
-                + "go through interact_at + transfer on their station.";
+                + "inventory fills. Only for [crafting] recipes — to smelt use the smelt tool (it finds "
+                + "or builds the furnace itself); stonecutter/smithing still go through interact_at + "
+                + "transfer on their station.";
     }
 
     @Override
