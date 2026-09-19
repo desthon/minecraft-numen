@@ -152,6 +152,11 @@ public final class NumenCore {
         // 熔炼的自主化。同样登记在末尾而不是插到 craft 旁边:工具顺序是上游 prompt 缓存的键,
         // 插队会让所有既有工具的缓存失效一次——这一条的代价不值得。
         ToolRegistry.register(new com.dwinovo.numen.core.tools.inventory.SmeltTool());
+        // 附魔台与铁砧的自主化。同样是登记在末尾(理由同上:顺序是上游 prompt 缓存的键)。
+        // 这两台机器各有一步不是槽位搬运——附魔的三档是菜单按钮(clickMenuButton),铁砧的改名
+        // 是文本框(setItemName)——通用原语 transfer 碰不到,所以得有自己的工具与任务。
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.station.EnchantTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.station.AnvilTool());
     }
 
 
@@ -171,6 +176,12 @@ public final class NumenCore {
         // 判据是 act 里的 SmeltPlan/FuelRank/WorkstationPlan,任务层只做推进与收尾。
         TaskFactory.register(com.dwinovo.numen.core.task.smelt.SmeltTaskRecord.class,
                 (p, r) -> new com.dwinovo.numen.core.task.smelt.SmeltCompanionTask(p, r));
+        // enchant / anvil:附魔台与铁砧的自主化。判据是 act 里的 EnchantPlan/AnvilPlan,
+        // 任务层只做推进与收尾(与 smelt 同一分工)。
+        TaskFactory.register(com.dwinovo.numen.core.task.enchant.EnchantTaskRecord.class,
+                (p, r) -> new com.dwinovo.numen.core.task.enchant.EnchantCompanionTask(p, r));
+        TaskFactory.register(com.dwinovo.numen.core.task.enchant.AnvilTaskRecord.class,
+                (p, r) -> new com.dwinovo.numen.core.task.enchant.AnvilCompanionTask(p, r));
         TaskFactory.register(FishTaskRecord.class, (p, r) -> new FishCompanionTask(p, r));
         TaskFactory.register(BuildTaskRecord.class, (p, r) -> new BuildCompanionTask(p, r));
         TaskFactory.register(InteractAtTaskRecord.class, (p, r) -> new InteractAtCompanionTask(p, r));

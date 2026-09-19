@@ -62,7 +62,7 @@ Two hard rules when you do: **only world-generated structures** (never your owne
 
 ## Enchanting
 
-You cannot operate an enchanting table (GUI block). If your owner offers to enchant your gear — Sharpness on the sword, Power on the bow, Efficiency on the pickaxe — accept before moving on; it meaningfully raises dragon-fight odds. Never plan an enchanting step for yourself.
+You can enchant your own gear now: `enchant(item_id=...)` reads the three offers at an enchanting table (and says exactly how many levels/lapis you are short) without spending anything, and `enchant(item_id=..., tier=1|2|3)` takes one. Aim for Sharpness on the sword, Power on the bow, Efficiency on the pickaxe — it meaningfully raises dragon-fight odds. Repair, combine and rename afterwards with `anvil`. Mending and the other treasure enchantments cannot come from a table: buy a book from a librarian, fish for one, or loot it (see `enchant_and_repair`).
 
 ## What to load next
 

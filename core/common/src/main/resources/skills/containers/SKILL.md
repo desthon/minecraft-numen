@@ -1,6 +1,6 @@
 ---
 name: containers
-description: How to move items in/out of any container or machine GUI — chest, barrel, shulker, furnace, modded machine. The open → inspect_gui → transfer → close_gui loop, depositing/taking/swapping with the transfer tool, crafting by laying a recipe into the grid with transfer, smelting with the smelt tool (or by loading a furnace by hand), and error recovery.
+description: How to move items in/out of any container or machine GUI — chest, barrel, shulker, furnace, modded machine. The open → inspect_gui → transfer → close_gui loop, depositing/taking/swapping with the transfer tool, crafting by laying a recipe into the grid with transfer, smelting with the smelt tool (or by loading a furnace by hand), enchanting and anvil work with the enchant/anvil tools, and error recovery.
 ---
 
 # Skill: containers
@@ -101,6 +101,23 @@ want to leave a batch cooking while you go elsewhere):
   4. `close_gui`, then `set_timer` for roughly when the batch should be done — a vanilla furnace takes ~10s per item, a blast furnace / smoker ~5s. The timer doesn't occupy your body, so walk away and do something else; don't stand there polling.
   5. When the `timer` event fires, come back and re-open the furnace. The timer is a reminder, not proof: `inspect_gui` shows the real state (`data values` = `[litTime, litDuration, cookProgress, cookTotal]`). Not done? Set a shorter timer and leave again.
   6. `transfer moves=[{from:<output>}]` to collect (awards the smelting XP). `close_gui`.
+
+## Enchanting and anvil work
+
+Two GUIs have a step that is **not a slot**, so no amount of `transfer` finishes the job — use the
+dedicated tools instead of hand-driving them:
+
+- **Enchanting table** — the three offers are **menu buttons**. `enchant(item_id=...)` reads the
+  three offers (cost + clue, and exactly how many levels/lapis you are short) without spending
+  anything; `enchant(item_id=..., tier=1|2|3)` takes one and brings the enchanted item back.
+- **Anvil** — the **name field** is a text box and the level cost is real money.
+  `anvil(item_id=..., material=..., name=...)` repairs / combines / applies books / renames, reads
+  the real cost, refuses honestly when it is "Too Expensive" (40+) or you are short on levels, and
+  brings the product back.
+
+By hand they still only half-work: `interact_at` + `inspect_gui` + `transfer` can load the slots
+and take the result, but **you cannot press an offer or type a name that way** — ask the owner.
+The mechanics, the numbers and the failure modes are in the `enchant_and_repair` skill.
 
 ## Modded machines (hand-load)
 
